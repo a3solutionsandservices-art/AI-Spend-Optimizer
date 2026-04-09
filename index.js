@@ -671,30 +671,31 @@ app.get('/scan/gmail', async (req, res) => {
   if (!accessToken) return res.status(400).json({ error: 'No Gmail access token — please sign out and sign in again with Google' });
 
   try {
-    // Broad search — catches receipts, invoices, renewals from any AI vendor
+    // Search all mail including spam/trash — no label filter
     const query = encodeURIComponent(
       '(from:(openai.com OR anthropic.com OR cursor.sh OR github.com OR midjourney.com OR ' +
       'perplexity.ai OR notion.so OR runway.ml OR canva.com OR replit.com OR jasper.ai OR ' +
-      'grammarly.com OR tabnine.com OR heygen.com OR elevenlabs.io OR zapier.com) ' +
-      'OR subject:(receipt OR invoice OR subscription OR renewal OR billing OR "payment" OR ' +
-      '"charged" OR "your plan" OR "ChatGPT" OR "Claude" OR "Cursor" OR "Midjourney" OR ' +
-      '"Copilot" OR "Perplexity" OR "Notion" OR "Grammarly")) ' +
-      'newer_than:12m'
+      'grammarly.com OR tabnine.com OR heygen.com OR elevenlabs.io OR zapier.com OR ' +
+      'adobe.com OR figma.com OR loom.com OR otter.ai OR descript.com OR murf.ai) ' +
+      'OR subject:(receipt OR invoice OR subscription OR renewal OR billing OR payment OR ' +
+      'charged OR "your plan" OR ChatGPT OR Claude OR Cursor OR Midjourney OR ' +
+      'Copilot OR Perplexity OR Notion OR Grammarly OR Jasper OR Runway OR Canva))'
     );
 
+    // Search across ALL mail (inbox + spam + trash) by querying without label restriction
     const listRes = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${query}&maxResults=50`,
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${query}&maxResults=100&includeSpamTrash=true`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
     const listData = await listRes.json();
 
     if (!listData.messages || listData.messages.length === 0) {
-      return res.json({ candidates: [], message: 'No AI billing emails found in last 12 months' });
+      return res.json({ candidates: [], message: 'No AI billing emails found. Try the paste text option and paste an email manually.' });
     }
 
-    // Fetch emails — use metadata+snippet for speed, full only if needed
+    // Fetch up to 40 emails in parallel
     const emails = await Promise.all(
-      listData.messages.slice(0, 30).map(async ({ id }) => {
+      listData.messages.slice(0, 40).map(async ({ id }) => {
         const msgRes = await fetch(
           `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
           { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -707,7 +708,6 @@ app.get('/scan/gmail', async (req, res) => {
     function extractText(payload) {
       if (!payload) return '';
       const mimeType = payload.mimeType || '';
-      // Prefer text/plain, fall back to text/html stripped of tags
       if (mimeType === 'text/plain' && payload.body?.data) {
         return Buffer.from(payload.body.data, 'base64').toString('utf8');
       }
@@ -718,14 +718,13 @@ app.get('/scan/gmail', async (req, res) => {
       if (payload.parts) {
         return payload.parts.map(p => extractText(p)).join('\n');
       }
-      // Fallback: decode body data if present
       if (payload.body?.data) {
         return Buffer.from(payload.body.data, 'base64').toString('utf8');
       }
       return '';
     }
 
-    // Build combined text: subject + snippet + body for each email
+    // Build text per email: from + subject + snippet + body
     const allText = emails.map(e => {
       const subject = e.payload?.headers?.find(h => h.name === 'Subject')?.value || '';
       const from    = e.payload?.headers?.find(h => h.name === 'From')?.value || '';
@@ -735,7 +734,7 @@ app.get('/scan/gmail', async (req, res) => {
     }).join('\n---\n');
 
     const candidates = scanText(allText);
-    res.json({ candidates, scanned: emails.length });
+    res.json({ candidates, scanned: emails.length, found: listData.messages.length });
   } catch (err) {
     console.error('Gmail scan error:', err);
     res.status(500).json({ error: 'Gmail scan failed — ' + err.message });
