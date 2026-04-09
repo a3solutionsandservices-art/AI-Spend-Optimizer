@@ -233,15 +233,20 @@ function ImportPanel({ onImported }) {
     if (tab === 'csv')   { endpoint = '/scan/csv';  body = { csv: src }; }
     if (tab === 'text')  { endpoint = '/scan/text'; body = { text: src }; }
     if (tab === 'email') { endpoint = '/scan/text'; body = { text: emailAddr }; }
-    const res = await apiFetch(`${API}${endpoint}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    setCandidates((data.candidates || []).map(c => ({
-      ...c, accepted: true,
-      editName: c.name, editCost: String(c.cost), editCat: c.category,
-    })));
+    if (!endpoint) { setScanning(false); return; }
+    try {
+      const res = await apiFetch(`${API}${endpoint}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      setCandidates((data.candidates || []).map(c => ({
+        ...c, accepted: true,
+        editName: c.name, editCost: String(c.cost), editCat: c.category,
+      })));
+    } catch (e) {
+      console.error('Scan error:', e);
+    }
     setScanning(false);
   };
 
