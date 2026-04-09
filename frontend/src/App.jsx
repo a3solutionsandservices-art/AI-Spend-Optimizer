@@ -212,7 +212,7 @@ function DropZone({ onFile }) {
 
 // ── ImportPanel ───────────────────────────────────────────────────────────────
 function ImportPanel({ onImported }) {
-  const [open, setOpen]             = useState(false);
+  const [open, setOpen]             = useState(true);
   const [tab, setTab]               = useState('csv');
   const [input, setInput]           = useState('');
   const [emailAddr, setEmailAddr]   = useState('');
@@ -500,9 +500,15 @@ export default function App() {
       <div className="main-grid">
         {/* ── LEFT ── */}
         <div>
+          {/* Import panel — prominent at top */}
+          <div className="card" style={{ marginBottom: 16 }}>
+            <h2>📥 Import Your Subscriptions</h2>
+            <ImportPanel onImported={fetchAll} />
+          </div>
+
           {/* Add tool form */}
           <div className="card">
-            <h2>Add AI Tool</h2>
+            <h2>Add AI Tool Manually</h2>
             <form onSubmit={handleAdd}>
               <div className="form-group">
                 <label>Tool Name</label>
@@ -534,7 +540,6 @@ export default function App() {
                 {loading ? 'Adding…' : '+ Add Tool'}
               </button>
             </form>
-            <ImportPanel onImported={fetchAll} />
           </div>
 
           {/* Quick tips */}
