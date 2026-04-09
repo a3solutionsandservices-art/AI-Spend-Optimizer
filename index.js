@@ -642,4 +642,4 @@ app.delete('/subscriptions/:id', (req, res) => {
 app.get('/insights', (req, res) => res.json(generateInsights(getAllSubs())));
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Backend running on port ${PORT} on 0.0.0.0`));
