@@ -69,20 +69,25 @@ function getUserById(id) {
   return store.users.find(u => u.id === id) || null;
 }
 
-// ── Token store (in-memory, survives restarts via data.json) ──────────────────
+// ── Signed tokens (survive restarts — no server-side storage needed) ──────────
+const crypto = require('crypto');
+const TOKEN_SECRET = process.env.SESSION_SECRET || 'ai-spend-dev-secret-change-in-prod';
+
 function createToken(userId) {
-  const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Date.now().toString(36);
-  if (!store.tokens) store.tokens = {};
-  store.tokens[token] = { userId, createdAt: Date.now() };
-  saveDB(store);
-  return token;
+  const payload = Buffer.from(JSON.stringify({ userId, ts: Date.now() })).toString('base64url');
+  const sig = crypto.createHmac('sha256', TOKEN_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
 }
 
 function getUserByToken(token) {
-  if (!token || !store.tokens) return null;
-  const entry = store.tokens[token];
-  if (!entry) return null;
-  return getUserById(entry.userId);
+  if (!token) return null;
+  try {
+    const [payload, sig] = token.split('.');
+    const expected = crypto.createHmac('sha256', TOKEN_SECRET).update(payload).digest('base64url');
+    if (sig !== expected) return null;
+    const { userId } = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    return getUserById(userId);
+  } catch { return null; }
 }
 
 function authMiddleware(req, res, next) {

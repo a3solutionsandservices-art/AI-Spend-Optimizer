@@ -31,7 +31,7 @@ function useAuth() {
 
     Promise.all([
       apiFetch(`${API}/auth/status`).then(r => r.json()).catch(() => ({ authRequired: false })),
-      apiFetch(`${API}/auth/me`).then(r => r.ok ? r.json() : null).catch(() => null),
+      apiFetch(`${API}/auth/me`).then(r => { if (!r.ok) { clearToken(); return null; } return r.json(); }).catch(() => null),
     ]).then(([status, me]) => {
       setAuthRequired(status.authRequired || false);
       setUser(me);
