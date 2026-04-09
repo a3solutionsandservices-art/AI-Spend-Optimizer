@@ -71,20 +71,21 @@ function getUserById(id) {
 
 const app = express();
 
+const isProd = process.env.NODE_ENV === 'production';
+if (isProd) app.set('trust proxy', 1);
+
 // ── CORS ─────────────────────────────────────────────────────────────────────
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 app.use(cors({ origin: [FRONTEND_URL, /localhost/], credentials: true }));
 app.use(express.json());
 
 // ── Session ──────────────────────────────────────────────────────────────────
-const isProd = process.env.NODE_ENV === 'production';
 app.use(session({
   secret: process.env.SESSION_SECRET || 'ai-spend-dev-secret-change-in-prod',
   resave: false,
   saveUninitialized: false,
   cookie: { secure: isProd, sameSite: isProd ? 'none' : 'lax', maxAge: 7 * 24 * 60 * 60 * 1000 },
 }));
-if (isProd) app.set('trust proxy', 1);
 
 // ── Passport ─────────────────────────────────────────────────────────────────
 app.use(passport.initialize());
