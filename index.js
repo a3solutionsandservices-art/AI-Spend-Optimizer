@@ -649,25 +649,30 @@ app.get('/scan/gmail', async (req, res) => {
   if (!accessToken) return res.status(400).json({ error: 'No Gmail access token — please sign out and sign in again with Google' });
 
   try {
-    // Search for billing/subscription emails from known AI vendors
+    // Broad search — catches receipts, invoices, renewals from any AI vendor
     const query = encodeURIComponent(
-      'subject:(receipt OR invoice OR subscription OR renewal OR billing OR "your plan" OR "payment confirmed") ' +
-      'newer_than:6m'
+      '(from:(openai.com OR anthropic.com OR cursor.sh OR github.com OR midjourney.com OR ' +
+      'perplexity.ai OR notion.so OR runway.ml OR canva.com OR replit.com OR jasper.ai OR ' +
+      'grammarly.com OR tabnine.com OR heygen.com OR elevenlabs.io OR zapier.com) ' +
+      'OR subject:(receipt OR invoice OR subscription OR renewal OR billing OR "payment" OR ' +
+      '"charged" OR "your plan" OR "ChatGPT" OR "Claude" OR "Cursor" OR "Midjourney" OR ' +
+      '"Copilot" OR "Perplexity" OR "Notion" OR "Grammarly")) ' +
+      'newer_than:12m'
     );
 
     const listRes = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${query}&maxResults=30`,
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${query}&maxResults=50`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
     const listData = await listRes.json();
 
     if (!listData.messages || listData.messages.length === 0) {
-      return res.json({ candidates: [], message: 'No billing emails found in last 6 months' });
+      return res.json({ candidates: [], message: 'No AI billing emails found in last 12 months' });
     }
 
-    // Fetch each email body
+    // Fetch emails — use metadata+snippet for speed, full only if needed
     const emails = await Promise.all(
-      listData.messages.slice(0, 20).map(async ({ id }) => {
+      listData.messages.slice(0, 30).map(async ({ id }) => {
         const msgRes = await fetch(
           `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
           { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -676,23 +681,35 @@ app.get('/scan/gmail', async (req, res) => {
       })
     );
 
-    // Extract text from email parts
+    // Recursively extract plain text from all MIME parts
     function extractText(payload) {
       if (!payload) return '';
-      if (payload.body?.data) {
-        return Buffer.from(payload.body.data, 'base64url').toString('utf8');
+      const mimeType = payload.mimeType || '';
+      // Prefer text/plain, fall back to text/html stripped of tags
+      if (mimeType === 'text/plain' && payload.body?.data) {
+        return Buffer.from(payload.body.data, 'base64').toString('utf8');
+      }
+      if (mimeType === 'text/html' && payload.body?.data) {
+        const html = Buffer.from(payload.body.data, 'base64').toString('utf8');
+        return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
       }
       if (payload.parts) {
         return payload.parts.map(p => extractText(p)).join('\n');
       }
+      // Fallback: decode body data if present
+      if (payload.body?.data) {
+        return Buffer.from(payload.body.data, 'base64').toString('utf8');
+      }
       return '';
     }
 
-    // Combine all email text and run through scanner
+    // Build combined text: subject + snippet + body for each email
     const allText = emails.map(e => {
       const subject = e.payload?.headers?.find(h => h.name === 'Subject')?.value || '';
-      const body = extractText(e.payload);
-      return `${subject}\n${body}`;
+      const from    = e.payload?.headers?.find(h => h.name === 'From')?.value || '';
+      const snippet = e.snippet || '';
+      const body    = extractText(e.payload);
+      return `${from}\n${subject}\n${snippet}\n${body}`;
     }).join('\n---\n');
 
     const candidates = scanText(allText);
