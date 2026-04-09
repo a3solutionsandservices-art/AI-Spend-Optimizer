@@ -671,15 +671,15 @@ app.get('/scan/gmail', async (req, res) => {
   if (!accessToken) return res.status(400).json({ error: 'No Gmail access token — please sign out and sign in again with Google' });
 
   try {
-    // Search all mail including spam/trash — no label filter
+    // Broad full-text search — matches body, subject, and sender
     const query = encodeURIComponent(
-      '(from:(openai.com OR anthropic.com OR cursor.sh OR github.com OR midjourney.com OR ' +
-      'perplexity.ai OR notion.so OR runway.ml OR canva.com OR replit.com OR jasper.ai OR ' +
-      'grammarly.com OR tabnine.com OR heygen.com OR elevenlabs.io OR zapier.com OR ' +
-      'adobe.com OR figma.com OR loom.com OR otter.ai OR descript.com OR murf.ai) ' +
-      'OR subject:(receipt OR invoice OR subscription OR renewal OR billing OR payment OR ' +
-      'charged OR "your plan" OR ChatGPT OR Claude OR Cursor OR Midjourney OR ' +
-      'Copilot OR Perplexity OR Notion OR Grammarly OR Jasper OR Runway OR Canva))'
+      '(chatgpt OR openai OR anthropic OR claude OR cursor OR midjourney OR copilot OR ' +
+      'perplexity OR grammarly OR notion OR canva OR jasper OR runway OR replit OR ' +
+      'tabnine OR elevenlabs OR heygen OR synthesia OR zapier OR figma OR loom OR ' +
+      'deepseek OR gemini OR "github copilot" OR "stable diffusion") ' +
+      'OR (receipt OR invoice OR "subscription renewed" OR "payment receipt" OR ' +
+      '"payment confirmed" OR "monthly subscription" OR "annual subscription" OR ' +
+      '"billing confirmation" OR "order confirmation")'
     );
 
     // Search across ALL mail (inbox + spam + trash) by querying without label restriction
