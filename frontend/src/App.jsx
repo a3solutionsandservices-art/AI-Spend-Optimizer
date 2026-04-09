@@ -222,8 +222,11 @@ function ImportPanel({ onImported, user }) {
   const [candidates, setCandidates] = useState([]);
   const [importing, setImporting]   = useState(false);
   const [result, setResult]         = useState(null);
+  const [fileInfo, setFileInfo]     = useState(null);   // { name, size }
+  const [fileStatus, setFileStatus] = useState('');     // status message for file scan
+  const [fileDragOver, setFileDragOver] = useState(false);
 
-  const reset = () => { setCandidates([]); setResult(null); setGmailMsg(''); };
+  const reset = () => { setCandidates([]); setResult(null); setGmailMsg(''); setFileInfo(null); setFileStatus(''); };
 
   const scanGmail = async () => {
     setGmailScanning(true);
@@ -271,6 +274,75 @@ function ImportPanel({ onImported, user }) {
     setScanning(false);
   };
 
+  const scanFile = async (file) => {
+    if (!file) return;
+    setScanning(true);
+    reset();
+    setFileInfo({ name: file.name, size: file.size });
+    const ext = file.name.split('.').pop().toLowerCase();
+    try {
+      if (ext === 'csv') {
+        setFileStatus('📄 Reading CSV file…');
+        const text = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = e => resolve(e.target.result);
+          reader.onerror = reject;
+          reader.readAsText(file);
+        });
+        const res = await apiFetch(`${API}/scan/csv`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ csv: text }),
+        });
+        const data = await res.json();
+        setCandidates((data.candidates || []).map(c => ({ ...c, accepted: true, editName: c.name, editCost: String(c.cost), editCat: c.category })));
+        setFileStatus('');
+      } else if (ext === 'png' || ext === 'jpg' || ext === 'jpeg') {
+        setFileStatus('🔍 Reading text from image…');
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = e => resolve(e.target.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        // Load Tesseract.js from CDN if not already loaded
+        if (!window.Tesseract) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+            script.onload = resolve;
+            script.onerror = reject;
+            document.head.appendChild(script);
+          });
+        }
+        const { data: { text } } = await window.Tesseract.recognize(dataUrl, 'eng');
+        setFileStatus('📋 Scanning extracted text…');
+        const res = await apiFetch(`${API}/scan/text`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        const data = await res.json();
+        setCandidates((data.candidates || []).map(c => ({ ...c, accepted: true, editName: c.name, editCost: String(c.cost), editCat: c.category })));
+        setFileStatus('');
+      } else {
+        // PDF or TXT — send to /scan/file
+        setFileStatus(ext === 'pdf' ? '📄 Extracting text from PDF…' : '📄 Reading text file…');
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await apiFetch(`${API}/scan/file`, { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.error) { setFileStatus('Error: ' + data.error); }
+        else {
+          setCandidates((data.candidates || []).map(c => ({ ...c, accepted: true, editName: c.name, editCost: String(c.cost), editCat: c.category })));
+          setFileStatus('');
+        }
+      }
+    } catch (e) {
+      console.error('File scan error:', e);
+      setFileStatus('Scan failed. Please try again.');
+    }
+    setScanning(false);
+  };
+
   const toggle = (id) => setCandidates(cs => cs.map(c => c.id === id ? { ...c, accepted: !c.accepted } : c));
   const update = (id, f, v) => setCandidates(cs => cs.map(c => c.id === id ? { ...c, [f]: v } : c));
 
@@ -309,6 +381,8 @@ function ImportPanel({ onImported, user }) {
                 onClick={() => { setTab('text'); reset(); setInput(''); }}>📋 Paste Text</button>
               <button className={`tab-btn${tab === 'email' ? ' active' : ''}`}
                 onClick={() => { setTab('email'); reset(); setInput(''); }}>✉️ Email</button>
+              <button className={`tab-btn${tab === 'computer' ? ' active' : ''}`}
+                onClick={() => { setTab('computer'); reset(); setInput(''); }}>💻 Computer</button>
             </div>
 
             {tab === 'csv' ? (
@@ -361,6 +435,45 @@ function ImportPanel({ onImported, user }) {
               </div>
             )}
 
+            {tab === 'computer' && (
+              <div
+                className={`file-drop-zone${fileDragOver ? ' drag-over' : ''}`}
+                onDragOver={e => { e.preventDefault(); setFileDragOver(true); }}
+                onDragLeave={() => setFileDragOver(false)}
+                onDrop={e => {
+                  e.preventDefault();
+                  setFileDragOver(false);
+                  const f = e.dataTransfer.files[0];
+                  if (f) scanFile(f);
+                }}
+                onClick={() => {
+                  const inp = document.createElement('input');
+                  inp.type = 'file';
+                  inp.accept = '.pdf,.txt,.csv,.png,.jpg,.jpeg';
+                  inp.onchange = e => { if (e.target.files[0]) scanFile(e.target.files[0]); };
+                  inp.click();
+                }}
+              >
+                <div className="file-drop-icon">📁</div>
+                <div className="file-drop-title">
+                  {scanning && fileInfo
+                    ? (fileStatus || '⏳ Processing…')
+                    : 'Drop a file here or click to browse'}
+                </div>
+                {fileInfo && (
+                  <div className="file-drop-meta">
+                    {fileInfo.name} · {(fileInfo.size / 1024).toFixed(1)} KB
+                  </div>
+                )}
+                {!fileInfo && (
+                  <div className="file-drop-formats">
+                    Supported: PDF · TXT · CSV · PNG · JPG
+                  </div>
+                )}
+              </div>
+            )}
+
+            {tab !== 'computer' && (
             <button
               className="scan-btn"
               onClick={() => scan()}
@@ -368,6 +481,7 @@ function ImportPanel({ onImported, user }) {
             >
               🔍 Scan Pasted Text
             </button>
+            )}
 
             {result != null && (
               <div className="optimization-insight" style={{ marginTop: 10 }}>

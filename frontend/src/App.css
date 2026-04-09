@@ -984,3 +984,24 @@ header .tagline {
 .gmail-scan-btn:disabled { opacity: .6; cursor: not-allowed; }
 .gmail-msg { font-size: .8rem; color: #1E3A8A; margin-top: 10px; font-weight: 500; }
 .email-or-divider { text-align: center; font-size: .78rem; color: var(--text-3); margin: 10px 0; }
+
+/* File drop zone (Scan by Computer) */
+.file-drop-zone {
+  border: 2px dashed #3B82F6;
+  border-radius: 12px;
+  padding: 32px 20px;
+  text-align: center;
+  cursor: pointer;
+  background: #EFF6FF;
+  transition: background .15s, border-color .15s;
+  margin-bottom: 12px;
+  user-select: none;
+}
+.file-drop-zone:hover, .file-drop-zone.drag-over {
+  background: #DBEAFE;
+  border-color: #1E3A8A;
+}
+.file-drop-icon { font-size: 2rem; margin-bottom: 8px; }
+.file-drop-title { font-weight: 600; font-size: .95rem; color: #1E3A8A; margin-bottom: 6px; }
+.file-drop-meta { font-size: .8rem; color: #3B82F6; font-weight: 500; }
+.file-drop-formats { font-size: .78rem; color: #6B7280; }

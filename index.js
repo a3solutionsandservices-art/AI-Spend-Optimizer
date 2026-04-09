@@ -703,6 +703,33 @@ app.get('/scan/gmail', async (req, res) => {
   }
 });
 
+// ── File upload (multer) ──────────────────────────────────────────────────────
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
+
+// POST /scan/file  — upload PDF or TXT file
+app.post('/scan/file', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'file is required.' });
+  const mime = req.file.mimetype;
+  const originalName = req.file.originalname || '';
+  const ext = originalName.split('.').pop().toLowerCase();
+  try {
+    let text = '';
+    if (mime === 'application/pdf' || ext === 'pdf') {
+      const pdfParse = require('pdf-parse');
+      const data = await pdfParse(req.file.buffer);
+      text = data.text;
+    } else {
+      // TXT or any other text-based file
+      text = req.file.buffer.toString('utf8');
+    }
+    res.json({ candidates: scanText(text) });
+  } catch (err) {
+    console.error('File scan error:', err);
+    res.status(500).json({ error: 'File scan failed — ' + err.message });
+  }
+});
+
 // POST /scan/text  — paste raw text
 app.post('/scan/text', (req, res) => {
   const { text } = req.body;
