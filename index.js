@@ -135,6 +135,9 @@ function upsertUser(profile) {
 // Google
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3001';
 
+// In-memory access token store (survives as long as process is up)
+const accessTokens = {};
+
 if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   passport.use(new GoogleStrategy({
     clientID:     process.env.GOOGLE_CLIENT_ID,
@@ -148,6 +151,7 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
       avatar:      profile.photos?.[0]?.value || '',
       provider:    'google',
     });
+    accessTokens[user.id] = accessToken; // store for Gmail API
     done(null, user);
   }));
 }
@@ -194,7 +198,11 @@ app.get('/auth/logout', (req, res) => {
 
 // Google
 app.get('/auth/google',
-  passport.authenticate('google', { scope: ['profile', 'email'], session: false }));
+  passport.authenticate('google', {
+    scope: ['profile', 'email', 'https://www.googleapis.com/auth/gmail.readonly'],
+    accessType: 'online',
+    session: false,
+  }));
 app.get('/auth/google/callback',
   passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}?auth=failed`, session: false }),
   (req, res) => {
@@ -631,6 +639,69 @@ function scanCSV(text) {
 
   return candidates;
 }
+
+// GET /scan/gmail  — auto-scan signed-in user's Gmail inbox
+app.get('/scan/gmail', async (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
+  if (req.user.provider !== 'google') return res.status(400).json({ error: 'Gmail scan requires Google sign-in' });
+
+  const accessToken = accessTokens[req.user.id];
+  if (!accessToken) return res.status(400).json({ error: 'No Gmail access token — please sign out and sign in again with Google' });
+
+  try {
+    // Search for billing/subscription emails from known AI vendors
+    const query = encodeURIComponent(
+      'subject:(receipt OR invoice OR subscription OR renewal OR billing OR "your plan" OR "payment confirmed") ' +
+      'newer_than:6m'
+    );
+
+    const listRes = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${query}&maxResults=30`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const listData = await listRes.json();
+
+    if (!listData.messages || listData.messages.length === 0) {
+      return res.json({ candidates: [], message: 'No billing emails found in last 6 months' });
+    }
+
+    // Fetch each email body
+    const emails = await Promise.all(
+      listData.messages.slice(0, 20).map(async ({ id }) => {
+        const msgRes = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        return msgRes.json();
+      })
+    );
+
+    // Extract text from email parts
+    function extractText(payload) {
+      if (!payload) return '';
+      if (payload.body?.data) {
+        return Buffer.from(payload.body.data, 'base64url').toString('utf8');
+      }
+      if (payload.parts) {
+        return payload.parts.map(p => extractText(p)).join('\n');
+      }
+      return '';
+    }
+
+    // Combine all email text and run through scanner
+    const allText = emails.map(e => {
+      const subject = e.payload?.headers?.find(h => h.name === 'Subject')?.value || '';
+      const body = extractText(e.payload);
+      return `${subject}\n${body}`;
+    }).join('\n---\n');
+
+    const candidates = scanText(allText);
+    res.json({ candidates, scanned: emails.length });
+  } catch (err) {
+    console.error('Gmail scan error:', err);
+    res.status(500).json({ error: 'Gmail scan failed — ' + err.message });
+  }
+});
 
 // POST /scan/text  — paste raw text
 app.post('/scan/text', (req, res) => {

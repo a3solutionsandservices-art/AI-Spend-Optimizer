@@ -211,17 +211,38 @@ function DropZone({ onFile }) {
 }
 
 // ── ImportPanel ───────────────────────────────────────────────────────────────
-function ImportPanel({ onImported }) {
+function ImportPanel({ onImported, user }) {
   const [open, setOpen]             = useState(true);
-  const [tab, setTab]               = useState('csv');
+  const [tab, setTab]               = useState('email');
   const [input, setInput]           = useState('');
   const [emailAddr, setEmailAddr]   = useState('');
   const [scanning, setScanning]     = useState(false);
+  const [gmailScanning, setGmailScanning] = useState(false);
+  const [gmailMsg, setGmailMsg]     = useState('');
   const [candidates, setCandidates] = useState([]);
   const [importing, setImporting]   = useState(false);
   const [result, setResult]         = useState(null);
 
-  const reset = () => { setCandidates([]); setResult(null); };
+  const reset = () => { setCandidates([]); setResult(null); setGmailMsg(''); };
+
+  const scanGmail = async () => {
+    setGmailScanning(true);
+    reset();
+    try {
+      const res = await apiFetch(`${API}/scan/gmail`);
+      const data = await res.json();
+      if (data.error) { setGmailMsg(data.error); }
+      else if (data.candidates?.length === 0) { setGmailMsg(data.message || 'No AI subscriptions found in inbox.'); }
+      else {
+        setGmailMsg(`Found ${data.candidates.length} subscription(s) across ${data.scanned} emails.`);
+        setCandidates(data.candidates.map(c => ({
+          ...c, accepted: true,
+          editName: c.name, editCost: String(c.cost), editCat: c.category,
+        })));
+      }
+    } catch (e) { setGmailMsg('Scan failed. Please try again.'); }
+    setGmailScanning(false);
+  };
 
   const scan = async (text) => {
     const src = text ?? input;
@@ -313,12 +334,24 @@ function ImportPanel({ onImported }) {
 
             {tab === 'email' && (
               <div className="email-scan-panel">
-                <div className="email-scan-info">
-                  <div className="email-scan-title">📧 Paste forwarded subscription emails</div>
-                  <div className="email-scan-desc">
-                    Forward any billing or subscription confirmation emails to yourself, then paste the full email text below. The scanner detects AI tool names, plan tiers, and pricing from email body text.
+                {user?.provider === 'google' ? (
+                  <>
+                    <div className="gmail-auto-scan">
+                      <div className="gmail-auto-title">✨ Auto-scan your Gmail inbox</div>
+                      <div className="gmail-auto-desc">Searches your last 6 months of billing emails from AI tools automatically.</div>
+                      <button className="gmail-scan-btn" onClick={scanGmail} disabled={gmailScanning}>
+                        {gmailScanning ? '⏳ Scanning inbox…' : '📬 Scan My Gmail Inbox'}
+                      </button>
+                      {gmailMsg && <div className="gmail-msg">{gmailMsg}</div>}
+                    </div>
+                    <div className="email-or-divider">— or paste email text manually —</div>
+                  </>
+                ) : (
+                  <div className="gmail-auto-scan">
+                    <div className="gmail-auto-title">📬 Auto Gmail Scan</div>
+                    <div className="gmail-auto-desc">Sign in with Google to auto-scan your inbox for AI billing emails.</div>
                   </div>
-                </div>
+                )}
                 <textarea
                   placeholder={"Paste the full email text here:\n\nFrom: billing@openai.com\nSubject: Your ChatGPT Plus subscription\n\nYour monthly subscription of $20.00 has been renewed..."}
                   value={emailAddr}
@@ -333,7 +366,7 @@ function ImportPanel({ onImported }) {
               onClick={() => scan()}
               disabled={scanning || (tab === 'email' ? !emailAddr.trim() : !input.trim())}
             >
-              🔍 Scan for Subscriptions
+              🔍 Scan Pasted Text
             </button>
 
             {result != null && (
@@ -503,7 +536,7 @@ export default function App() {
           {/* Import panel — prominent at top */}
           <div className="card" style={{ marginBottom: 16 }}>
             <h2>📥 Import Your Subscriptions</h2>
-            <ImportPanel onImported={fetchAll} />
+            <ImportPanel onImported={fetchAll} user={user} />
           </div>
 
           {/* Add tool form */}
