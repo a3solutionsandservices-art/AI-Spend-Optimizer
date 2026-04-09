@@ -5,50 +5,43 @@ const session        = require('express-session');
 const passport       = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const GitHubStrategy = require('passport-github2').Strategy;
-const Database       = require('better-sqlite3');
+const initSqlJs      = require('sql.js');
+const fs             = require('fs');
 const path           = require('path');
 
-// ── SQLite setup ─────────────────────────────────────────────────────────────
-const db = new Database(path.join(__dirname, 'data.sqlite'));
+// ── SQLite setup (sql.js — pure WASM, no native compilation) ─────────────────
+const DB_PATH = path.join(__dirname, 'data.sqlite');
+let db; // set after async init
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS subscriptions (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    name         TEXT    NOT NULL,
-    cost         REAL    NOT NULL DEFAULT 0,
-    category     TEXT    NOT NULL DEFAULT 'other',
-    auto_detected INTEGER NOT NULL DEFAULT 0,
-    plan_name    TEXT,
-    usage_hint   TEXT,
-    start_date   TEXT,
-    renewal_date TEXT,
-    days_until_renewal INTEGER,
-    created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
-  );
+function saveDB() {
+  try {
+    const data = db.export();
+    fs.writeFileSync(DB_PATH, Buffer.from(data));
+  } catch (e) {
+    console.error('DB save error:', e);
+  }
+}
 
-  CREATE TABLE IF NOT EXISTS users (
-    id           TEXT PRIMARY KEY,
-    display_name TEXT,
-    email        TEXT,
-    avatar       TEXT,
-    provider     TEXT,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-`);
+// Query helpers that mimic better-sqlite3's synchronous API
+function dbAll(sql, params = []) {
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  const rows = [];
+  while (stmt.step()) rows.push(stmt.getAsObject());
+  stmt.free();
+  return rows;
+}
 
-// ── DB helpers ────────────────────────────────────────────────────────────────
-const stmts = {
-  allSubs:    db.prepare('SELECT * FROM subscriptions ORDER BY created_at DESC'),
-  insertSub:  db.prepare(`INSERT INTO subscriptions
-    (name, cost, category, auto_detected, plan_name, usage_hint, start_date, renewal_date, days_until_renewal)
-    VALUES (@name, @cost, @category, @autoDetected, @planName, @usageHint, @startDate, @renewalDate, @daysUntilRenewal)`),
-  deleteSub:  db.prepare('DELETE FROM subscriptions WHERE id = ?'),
-  getSub:     db.prepare('SELECT * FROM subscriptions WHERE id = ?'),
-  upsertUser: db.prepare(`INSERT INTO users (id, display_name, email, avatar, provider)
-    VALUES (@id, @displayName, @email, @avatar, @provider)
-    ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, email=excluded.email, avatar=excluded.avatar`),
-  getUser:    db.prepare('SELECT * FROM users WHERE id = ?'),
-};
+function dbGet(sql, params = []) {
+  const rows = dbAll(sql, params);
+  return rows[0] || null;
+}
+
+function dbRun(sql, params = []) {
+  db.run(sql, params);
+  saveDB();
+  return db.exec('SELECT last_insert_rowid() as id')[0]?.values[0][0] || null;
+}
 
 function dbRowToSub(row) {
   if (!row) return null;
@@ -70,7 +63,7 @@ const app = express();
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-app.use(cors({ origin: FRONTEND_URL, credentials: true }));
+app.use(cors({ origin: [FRONTEND_URL, /localhost/], credentials: true }));
 app.use(express.json());
 
 // ── Session ──────────────────────────────────────────────────────────────────
@@ -89,13 +82,19 @@ app.use(passport.session());
 
 passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser((id, done) => {
-  const row = stmts.getUser.get(id);
+  const row = dbGet('SELECT * FROM users WHERE id = ?', [id]);
   if (!row) return done(null, null);
   done(null, { id: row.id, displayName: row.display_name, email: row.email, avatar: row.avatar, provider: row.provider });
 });
 
 function upsertUser({ id, displayName, email, avatar, provider }) {
-  stmts.upsertUser.run({ id, displayName, email, avatar, provider });
+  db.run(
+    `INSERT INTO users (id, display_name, email, avatar, provider)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, email=excluded.email, avatar=excluded.avatar`,
+    [id, displayName, email, avatar, provider]
+  );
+  saveDB();
   return { id, displayName, email, avatar, provider };
 }
 
@@ -172,10 +171,28 @@ app.get('/auth/github/callback',
   passport.authenticate('github', { failureRedirect: `${FRONTEND_URL}?auth=failed` }),
   (req, res) => res.redirect(FRONTEND_URL));
 
-// Subscriptions now persisted in SQLite — helpers below replace in-memory array
-function getAllSubs()       { return stmts.allSubs.all().map(dbRowToSub); }
-function insertSub(fields)  { const r = stmts.insertSub.run(fields); return dbRowToSub(stmts.getSub.get(r.lastInsertRowid)); }
-function deleteSubById(id)  { return stmts.deleteSub.run(id).changes > 0; }
+// Subscriptions persisted in SQLite via sql.js
+function getAllSubs() {
+  return dbAll('SELECT * FROM subscriptions ORDER BY created_at DESC').map(dbRowToSub);
+}
+function insertSub(fields) {
+  db.run(
+    `INSERT INTO subscriptions (name, cost, category, auto_detected, plan_name, usage_hint, start_date, renewal_date, days_until_renewal)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [fields.name, fields.cost, fields.category, fields.autoDetected ? 1 : 0,
+     fields.planName, fields.usageHint, fields.startDate, fields.renewalDate, fields.daysUntilRenewal]
+  );
+  const rowId = db.exec('SELECT last_insert_rowid() as id')[0]?.values[0][0];
+  saveDB();
+  return dbRowToSub(dbGet('SELECT * FROM subscriptions WHERE id = ?', [rowId]));
+}
+function deleteSubById(id) {
+  const before = dbGet('SELECT id FROM subscriptions WHERE id = ?', [id]);
+  if (!before) return false;
+  db.run('DELETE FROM subscriptions WHERE id = ?', [id]);
+  saveDB();
+  return true;
+}
 
 // ── Auto-category detection ──────────────────────────────────────────────────
 const CATEGORY_MAP = {
@@ -644,5 +661,47 @@ app.delete('/subscriptions/:id', (req, res) => {
 
 app.get('/insights', (req, res) => res.json(generateInsights(getAllSubs())));
 
+// ── Bootstrap: init sql.js WASM, then start server ───────────────────────────
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+
+initSqlJs().then(SQL => {
+  // Load existing DB file or create new
+  if (fs.existsSync(DB_PATH)) {
+    const buf = fs.readFileSync(DB_PATH);
+    db = new SQL.Database(buf);
+  } else {
+    db = new SQL.Database();
+  }
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      name         TEXT    NOT NULL,
+      cost         REAL    NOT NULL DEFAULT 0,
+      category     TEXT    NOT NULL DEFAULT 'other',
+      auto_detected INTEGER NOT NULL DEFAULT 0,
+      plan_name    TEXT,
+      usage_hint   TEXT,
+      start_date   TEXT,
+      renewal_date TEXT,
+      days_until_renewal INTEGER,
+      created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id           TEXT PRIMARY KEY,
+      display_name TEXT,
+      email        TEXT,
+      avatar       TEXT,
+      provider     TEXT,
+      created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  saveDB();
+
+  app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+}).catch(err => {
+  console.error('Failed to init sql.js:', err);
+  process.exit(1);
+});
