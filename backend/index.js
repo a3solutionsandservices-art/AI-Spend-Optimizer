@@ -664,7 +664,7 @@ app.get('/insights', (req, res) => res.json(generateInsights(getAllSubs())));
 // ── Bootstrap: init sql.js WASM, then start server ───────────────────────────
 const PORT = process.env.PORT || 3001;
 
-initSqlJs().then(SQL => {
+initSqlJs({ locateFile: file => require.resolve(`sql.js/dist/${file}`) }).then(SQL => {
   // Load existing DB file or create new
   if (fs.existsSync(DB_PATH)) {
     const buf = fs.readFileSync(DB_PATH);
