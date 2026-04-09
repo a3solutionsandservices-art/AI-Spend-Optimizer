@@ -3,6 +3,17 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 // In production the frontend is on Vercel and backend on Railway — different origins
 const API = import.meta.env.VITE_API_URL || '';
 
+// ── Token helpers (localStorage) ──────────────────────────────────────────────
+function getToken() { return localStorage.getItem('auth_token'); }
+function setToken(t) { localStorage.setItem('auth_token', t); }
+function clearToken() { localStorage.removeItem('auth_token'); }
+function apiFetch(url, opts = {}) {
+  const token = getToken();
+  const headers = { ...(opts.headers || {}) };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return fetch(url, { ...opts, headers });
+}
+
 // ── Auth hook ─────────────────────────────────────────────────────────────────
 function useAuth() {
   const [user, setUser]           = useState(null);
@@ -10,9 +21,17 @@ function useAuth() {
   const [authRequired, setAuthRequired] = useState(false);
 
   useEffect(() => {
+    // Read token from URL if just redirected from OAuth
+    const params = new URLSearchParams(window.location.search);
+    const urlToken = params.get('token');
+    if (urlToken) {
+      setToken(urlToken);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+
     Promise.all([
-      fetch(`${API}/auth/status`, { credentials: 'include' }).then(r => r.json()).catch(() => ({ authRequired: false })),
-      fetch(`${API}/auth/me`,     { credentials: 'include' }).then(r => r.ok ? r.json() : null).catch(() => null),
+      apiFetch(`${API}/auth/status`).then(r => r.json()).catch(() => ({ authRequired: false })),
+      apiFetch(`${API}/auth/me`).then(r => r.ok ? r.json() : null).catch(() => null),
     ]).then(([status, me]) => {
       setAuthRequired(status.authRequired || false);
       setUser(me);
@@ -20,7 +39,11 @@ function useAuth() {
     });
   }, []);
 
-  const logout = () => { window.location.href = `${API}/auth/logout`; };
+  const logout = () => {
+    clearToken();
+    setUser(null);
+    window.location.href = `${API}/auth/logout`;
+  };
 
   return { user, checking, authRequired, logout };
 }
@@ -210,9 +233,8 @@ function ImportPanel({ onImported }) {
     if (tab === 'csv')   { endpoint = '/scan/csv';  body = { csv: src }; }
     if (tab === 'text')  { endpoint = '/scan/text'; body = { text: src }; }
     if (tab === 'email') { endpoint = '/scan/text'; body = { text: emailAddr }; }
-    const res = await fetch(`${API}${endpoint}`, {
+    const res = await apiFetch(`${API}${endpoint}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify(body),
     });
     const data = await res.json();
@@ -230,9 +252,8 @@ function ImportPanel({ onImported }) {
     const accepted = candidates.filter(c => c.accepted);
     if (!accepted.length) return;
     setImporting(true);
-    const res = await fetch(`${API}/scan/confirm`, {
+    const res = await apiFetch(`${API}/scan/confirm`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify({ candidates: accepted.map(c => ({ name: c.editName, cost: parseFloat(c.editCost) || 0, category: c.editCat })) }),
     });
     const data = await res.json();
@@ -372,8 +393,8 @@ export default function App() {
 
   const fetchAll = useCallback(async () => {
     const [t, i] = await Promise.all([
-      fetch(`${API}/subscriptions`, { credentials: 'include' }).then(r => r.json()),
-      fetch(`${API}/insights`,      { credentials: 'include' }).then(r => r.json()),
+      apiFetch(`${API}/subscriptions`).then(r => r.json()),
+      apiFetch(`${API}/insights`).then(r => r.json()),
     ]);
     setTools(t);
     setInsights(i);
@@ -387,7 +408,7 @@ export default function App() {
     clearTimeout(detectTimer.current);
     if (val.trim().length < 2) { setDetectedCat(null); return; }
     detectTimer.current = setTimeout(async () => {
-      const res = await fetch(`${API}/detect-category?name=${encodeURIComponent(val)}`, { credentials: 'include' });
+      const res = await apiFetch(`${API}/detect-category?name=${encodeURIComponent(val)}`);
       const d = await res.json();
       setDetectedCat(d.category || null);
     }, 300);
@@ -399,9 +420,8 @@ export default function App() {
     if (!form.name.trim() || !form.cost) { setError('Please fill in all fields.'); return; }
     if (isNaN(parseFloat(form.cost)) || parseFloat(form.cost) < 0) { setError('Cost must be a positive number.'); return; }
     setLoading(true);
-    await fetch(`${API}/subscriptions`, {
+    await apiFetch(`${API}/subscriptions`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify({ name: form.name.trim(), cost: parseFloat(form.cost), category: form.category }),
     });
     setForm({ name: '', cost: '', category: 'auto' });
@@ -411,7 +431,7 @@ export default function App() {
   };
 
   const handleDelete = async (id) => {
-    await fetch(`${API}/subscriptions/${id}`, { method: 'DELETE', credentials: 'include' });
+    await apiFetch(`${API}/subscriptions/${id}`, { method: 'DELETE' });
     await fetchAll();
   };
 

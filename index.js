@@ -69,6 +69,32 @@ function getUserById(id) {
   return store.users.find(u => u.id === id) || null;
 }
 
+// ── Token store (in-memory, survives restarts via data.json) ──────────────────
+function createToken(userId) {
+  const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  if (!store.tokens) store.tokens = {};
+  store.tokens[token] = { userId, createdAt: Date.now() };
+  saveDB(store);
+  return token;
+}
+
+function getUserByToken(token) {
+  if (!token || !store.tokens) return null;
+  const entry = store.tokens[token];
+  if (!entry) return null;
+  return getUserById(entry.userId);
+}
+
+function authMiddleware(req, res, next) {
+  const auth = req.headers['authorization'] || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : req.query.token;
+  if (token) {
+    const user = getUserByToken(token);
+    if (user) { req.user = user; }
+  }
+  next();
+}
+
 const app = express();
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -141,38 +167,45 @@ if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
 }
 
 // ── Auth routes ───────────────────────────────────────────────────────────────
+app.use(authMiddleware);
+
 app.get('/auth/me', (req, res) => {
-  if (req.isAuthenticated()) return res.json(req.user);
+  if (req.user) return res.json(req.user);
   res.status(401).json({ error: 'Not authenticated' });
 });
 
-// Tells the frontend which providers are configured
 app.get('/auth/status', (req, res) => {
   res.json({
     google: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
     github: !!(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET),
-    microsoft: false, // not yet implemented
+    microsoft: false,
     authRequired: !!(process.env.GOOGLE_CLIENT_ID || process.env.GITHUB_CLIENT_ID),
   });
 });
 
 app.get('/auth/logout', (req, res) => {
-  req.logout(() => res.redirect(FRONTEND_URL));
+  res.redirect(FRONTEND_URL);
 });
 
 // Google
 app.get('/auth/google',
-  passport.authenticate('google', { scope: ['profile', 'email'] }));
+  passport.authenticate('google', { scope: ['profile', 'email'], session: false }));
 app.get('/auth/google/callback',
-  passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}?auth=failed` }),
-  (req, res) => res.redirect(FRONTEND_URL));
+  passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}?auth=failed`, session: false }),
+  (req, res) => {
+    const token = createToken(req.user.id);
+    res.redirect(`${FRONTEND_URL}?token=${token}`);
+  });
 
 // GitHub
 app.get('/auth/github',
-  passport.authenticate('github', { scope: ['user:email'] }));
+  passport.authenticate('github', { scope: ['user:email'], session: false }));
 app.get('/auth/github/callback',
-  passport.authenticate('github', { failureRedirect: `${FRONTEND_URL}?auth=failed` }),
-  (req, res) => res.redirect(FRONTEND_URL));
+  passport.authenticate('github', { failureRedirect: `${FRONTEND_URL}?auth=failed`, session: false }),
+  (req, res) => {
+    const token = createToken(req.user.id);
+    res.redirect(`${FRONTEND_URL}?token=${token}`);
+  });
 
 
 // ── Auto-category detection ──────────────────────────────────────────────────
