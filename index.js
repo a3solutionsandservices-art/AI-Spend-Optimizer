@@ -662,6 +662,46 @@ function scanCSV(text) {
   return candidates;
 }
 
+// GET /scan/gmail/debug — shows raw Gmail search results for diagnosis
+app.get('/scan/gmail/debug', async (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
+  const accessToken = accessTokens[req.user.id];
+  if (!accessToken) return res.status(400).json({ error: 'No access token — sign out and sign in again' });
+
+  try {
+    const query = encodeURIComponent(
+      '(chatgpt OR openai OR anthropic OR claude OR cursor OR midjourney OR copilot OR ' +
+      'perplexity OR grammarly OR notion OR canva OR jasper OR runway OR replit OR ' +
+      'tabnine OR elevenlabs OR heygen OR zapier OR figma OR gemini) ' +
+      'OR (receipt OR invoice OR "subscription renewed" OR "payment receipt" OR ' +
+      '"monthly subscription" OR "billing confirmation")'
+    );
+    const listRes = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${query}&maxResults=10&includeSpamTrash=true`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const listData = await listRes.json();
+    if (!listData.messages) return res.json({ found: 0, listData });
+
+    // Fetch first 5 emails and return their subjects + from + snippet
+    const previews = await Promise.all(listData.messages.slice(0, 5).map(async ({ id }) => {
+      const r = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const m = await r.json();
+      return {
+        subject: m.payload?.headers?.find(h => h.name === 'Subject')?.value,
+        from:    m.payload?.headers?.find(h => h.name === 'From')?.value,
+        snippet: m.snippet?.slice(0, 100),
+      };
+    }));
+    res.json({ found: listData.messages.length, previews });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /scan/gmail  — auto-scan signed-in user's Gmail inbox
 app.get('/scan/gmail', async (req, res) => {
   if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
