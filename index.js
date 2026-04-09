@@ -5,68 +5,98 @@ const session        = require('express-session');
 const passport       = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const GitHubStrategy = require('passport-github2').Strategy;
-const fs             = require('fs');
-const path           = require('path');
+const { Pool }       = require('pg');
 
-// ── JSON file persistence (zero native deps) ──────────────────────────────────
-const DB_PATH = path.join(__dirname, 'data.json');
+// ── PostgreSQL ────────────────────────────────────────────────────────────────
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
 
-function loadDB() {
-  try {
-    if (fs.existsSync(DB_PATH)) return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-  } catch (e) { console.error('DB load error:', e); }
-  return { subscriptions: [], users: [], nextId: 1 };
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id           TEXT PRIMARY KEY,
+      display_name TEXT,
+      email        TEXT,
+      avatar       TEXT,
+      provider     TEXT,
+      created_at   TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      id                 SERIAL PRIMARY KEY,
+      user_id            TEXT REFERENCES users(id),
+      name               TEXT NOT NULL,
+      cost               REAL NOT NULL DEFAULT 0,
+      category           TEXT NOT NULL DEFAULT 'other',
+      auto_detected      BOOLEAN NOT NULL DEFAULT FALSE,
+      plan_name          TEXT,
+      usage_hint         TEXT,
+      start_date         TEXT,
+      renewal_date       TEXT,
+      days_until_renewal INTEGER,
+      created_at         TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
 }
 
-function saveDB(data) {
-  try { fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2)); }
-  catch (e) { console.error('DB save error:', e); }
-}
-
-let store = loadDB();
-
-function getAllSubs() {
-  return [...store.subscriptions].sort((a, b) => b.id - a.id);
-}
-
-function insertSub(fields) {
-  const sub = {
-    id:               store.nextId++,
-    name:             fields.name,
-    cost:             fields.cost,
-    category:         fields.category,
-    autoDetected:     !!fields.autoDetected,
-    planName:         fields.planName || null,
-    usageHint:        fields.usageHint || null,
-    startDate:        fields.startDate || null,
-    renewalDate:      fields.renewalDate || null,
-    daysUntilRenewal: fields.daysUntilRenewal || null,
-    createdAt:        new Date().toISOString(),
+function rowToSub(row) {
+  if (!row) return null;
+  return {
+    id:               row.id,
+    name:             row.name,
+    cost:             parseFloat(row.cost),
+    category:         row.category,
+    autoDetected:     row.auto_detected,
+    planName:         row.plan_name,
+    usageHint:        row.usage_hint,
+    startDate:        row.start_date,
+    renewalDate:      row.renewal_date,
+    daysUntilRenewal: row.days_until_renewal,
   };
-  store.subscriptions.push(sub);
-  saveDB(store);
-  return sub;
 }
 
-function deleteSubById(id) {
-  const idx = store.subscriptions.findIndex(s => s.id === id);
-  if (idx === -1) return false;
-  store.subscriptions.splice(idx, 1);
-  saveDB(store);
-  return true;
+async function getAllSubs(userId) {
+  const r = await pool.query(
+    'SELECT * FROM subscriptions WHERE user_id=$1 ORDER BY created_at DESC', [userId]);
+  return r.rows.map(rowToSub);
 }
 
-function upsertUserDB({ id, displayName, email, avatar, provider }) {
-  const idx = store.users.findIndex(u => u.id === id);
-  const user = { id, displayName, email, avatar, provider };
-  if (idx === -1) store.users.push(user);
-  else store.users[idx] = user;
-  saveDB(store);
-  return user;
+async function insertSub(userId, fields) {
+  const r = await pool.query(
+    `INSERT INTO subscriptions
+      (user_id,name,cost,category,auto_detected,plan_name,usage_hint,start_date,renewal_date,days_until_renewal)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    [userId, fields.name, fields.cost, fields.category, !!fields.autoDetected,
+     fields.planName||null, fields.usageHint||null, fields.startDate||null,
+     fields.renewalDate||null, fields.daysUntilRenewal||null]
+  );
+  return rowToSub(r.rows[0]);
 }
 
-function getUserById(id) {
-  return store.users.find(u => u.id === id) || null;
+async function deleteSubById(userId, id) {
+  const r = await pool.query(
+    'DELETE FROM subscriptions WHERE id=$1 AND user_id=$2', [id, userId]);
+  return r.rowCount > 0;
+}
+
+async function upsertUserDB({ id, displayName, email, avatar, provider }) {
+  await pool.query(
+    `INSERT INTO users (id,display_name,email,avatar,provider)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT(id) DO UPDATE SET display_name=$2,email=$3,avatar=$4`,
+    [id, displayName, email, avatar, provider]
+  );
+  return { id, displayName, email, avatar, provider };
+}
+
+async function getUserById(id) {
+  const r = await pool.query('SELECT * FROM users WHERE id=$1', [id]);
+  if (!r.rows[0]) return null;
+  const u = r.rows[0];
+  return { id: u.id, displayName: u.display_name, email: u.email, avatar: u.avatar, provider: u.provider };
 }
 
 // ── Signed tokens (survive restarts — no server-side storage needed) ──────────
@@ -79,22 +109,22 @@ function createToken(userId) {
   return `${payload}.${sig}`;
 }
 
-function getUserByToken(token) {
+async function getUserByToken(token) {
   if (!token) return null;
   try {
     const [payload, sig] = token.split('.');
     const expected = crypto.createHmac('sha256', TOKEN_SECRET).update(payload).digest('base64url');
     if (sig !== expected) return null;
     const { userId } = JSON.parse(Buffer.from(payload, 'base64url').toString());
-    return getUserById(userId);
+    return await getUserById(userId);
   } catch { return null; }
 }
 
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   const auth = req.headers['authorization'] || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : req.query.token;
   if (token) {
-    const user = getUserByToken(token);
+    const user = await getUserByToken(token);
     if (user) { req.user = user; }
   }
   next();
@@ -123,13 +153,13 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 passport.serializeUser((user, done) => done(null, user.id));
-passport.deserializeUser((id, done) => {
-  const user = getUserById(id);
+passport.deserializeUser(async (id, done) => {
+  const user = await getUserById(id);
   done(null, user || null);
 });
 
-function upsertUser(profile) {
-  return upsertUserDB(profile);
+async function upsertUser(profile) {
+  return await upsertUserDB(profile);
 }
 
 // Google
@@ -143,15 +173,15 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
     clientID:     process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     callbackURL:  `${BACKEND_URL}/auth/google/callback`,
-  }, (accessToken, refreshToken, profile, done) => {
-    const user = upsertUser({
+  }, async (accessToken, refreshToken, profile, done) => {
+    const user = await upsertUser({
       id:          `google:${profile.id}`,
       displayName: profile.displayName,
       email:       profile.emails?.[0]?.value || '',
       avatar:      profile.photos?.[0]?.value || '',
       provider:    'google',
     });
-    accessTokens[user.id] = accessToken; // store for Gmail API
+    accessTokens[user.id] = accessToken;
     done(null, user);
   }));
 }
@@ -163,8 +193,8 @@ if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
     clientSecret: process.env.GITHUB_CLIENT_SECRET,
     callbackURL:  `${BACKEND_URL}/auth/github/callback`,
     scope:        ['user:email'],
-  }, (accessToken, refreshToken, profile, done) => {
-    const user = upsertUser({
+  }, async (accessToken, refreshToken, profile, done) => {
+    const user = await upsertUser({
       id:          `github:${profile.id}`,
       displayName: profile.displayName || profile.username,
       email:       profile.emails?.[0]?.value || '',
@@ -458,42 +488,34 @@ function generateInsights(subs) {
 }
 
 // Routes
-app.get('/subscriptions', (req, res) => res.json(getAllSubs()));
+app.get('/subscriptions', async (req, res) => {
+  const userId = req.user?.id || 'anonymous';
+  res.json(await getAllSubs(userId));
+});
 
-// Expose detect endpoint so UI can preview category before submit
 app.get('/detect-category', (req, res) => {
   const name = req.query.name || '';
   const category = detectCategory(name);
   res.json({ category, autoDetected: !!category });
 });
 
-app.post('/subscriptions', (req, res) => {
+app.post('/subscriptions', async (req, res) => {
+  const userId = req.user?.id || 'anonymous';
   const { name, cost, category } = req.body;
-  if (!name || cost == null) {
-    return res.status(400).json({ error: 'name and cost are required.' });
-  }
+  if (!name || cost == null) return res.status(400).json({ error: 'name and cost are required.' });
   const trimmedName = name.trim();
   let resolvedCategory = category && category !== 'auto' ? category.toLowerCase() : null;
   let autoDetected = false;
-  if (!resolvedCategory) {
-    resolvedCategory = detectCategory(trimmedName) || 'other';
-    autoDetected = true;
-  }
+  if (!resolvedCategory) { resolvedCategory = detectCategory(trimmedName) || 'other'; autoDetected = true; }
   const parsedCost = parseFloat(cost);
   const { planName, usageHint } = detectPlan(trimmedName, parsedCost);
   const today = new Date().toISOString().split('T')[0];
   const startDate = req.body.startDate || today;
   const renewal = nextRenewal(startDate);
-  const tool = insertSub({
-    name: trimmedName,
-    cost: parsedCost,
-    category: resolvedCategory,
-    autoDetected: autoDetected ? 1 : 0,
-    planName:     planName || null,
-    usageHint:    usageHint || null,
-    startDate,
-    renewalDate:      renewal,
-    daysUntilRenewal: daysUntil(renewal),
+  const tool = await insertSub(userId, {
+    name: trimmedName, cost: parsedCost, category: resolvedCategory,
+    autoDetected, planName: planName||null, usageHint: usageHint||null,
+    startDate, renewalDate: renewal, daysUntilRenewal: daysUntil(renewal),
   });
   res.status(201).json(tool);
 });
@@ -767,33 +789,38 @@ app.post('/scan/confirm', (req, res) => {
   if (!Array.isArray(candidates) || candidates.length === 0) {
     return res.status(400).json({ error: 'candidates array is required.' });
   }
+  const userId = req.user?.id || 'anonymous';
   const today = new Date().toISOString().split('T')[0];
-  const added = candidates.map(c => {
+  const added = await Promise.all(candidates.map(async c => {
     const name = (c.name || '').trim();
     const cost = parseFloat(c.cost) || 0;
     const resolvedCategory = c.category && c.category !== 'auto'
-      ? c.category.toLowerCase()
-      : detectCategory(name) || 'other';
+      ? c.category.toLowerCase() : detectCategory(name) || 'other';
     const { planName, usageHint } = detectPlan(name, cost);
     const startDate = c.startDate || today;
     const renewal = nextRenewal(startDate);
-    const tool = insertSub({
+    return await insertSub(userId, {
       name, cost, category: resolvedCategory,
-      autoDetected: 1, planName: planName || null, usageHint: usageHint || null,
+      autoDetected: true, planName: planName||null, usageHint: usageHint||null,
       startDate, renewalDate: renewal, daysUntilRenewal: daysUntil(renewal),
     });
-    return tool;
-  });
+  }));
   res.status(201).json({ imported: added.length, tools: added });
 });
 
-app.delete('/subscriptions/:id', (req, res) => {
+app.delete('/subscriptions/:id', async (req, res) => {
+  const userId = req.user?.id || 'anonymous';
   const id = parseInt(req.params.id);
-  if (!deleteSubById(id)) return res.status(404).json({ error: 'Not found.' });
+  if (!await deleteSubById(userId, id)) return res.status(404).json({ error: 'Not found.' });
   res.json({ success: true });
 });
 
-app.get('/insights', (req, res) => res.json(generateInsights(getAllSubs())));
+app.get('/insights', async (req, res) => {
+  const userId = req.user?.id || 'anonymous';
+  res.json(generateInsights(await getAllSubs(userId)));
+});
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`Backend running on port ${PORT} on 0.0.0.0`));
+initDB()
+  .then(() => app.listen(PORT, '0.0.0.0', () => console.log(`Backend running on port ${PORT}`)))
+  .catch(err => { console.error('DB init failed:', err); process.exit(1); });
