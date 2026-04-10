@@ -141,12 +141,15 @@ if (isProd) app.set('trust proxy', 1);
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-app.use(cors({ origin: [FRONTEND_URL, /localhost/], credentials: true }));
+const allowedOrigins = isProd ? [FRONTEND_URL] : [FRONTEND_URL, /localhost/];
+app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(express.json());
 
 // ── Session ──────────────────────────────────────────────────────────────────
+const SESSION_SECRET = process.env.SESSION_SECRET || (isProd ? null : 'ai-spend-dev-secret');
+if (!SESSION_SECRET) { console.error('SESSION_SECRET env var is required in production'); process.exit(1); }
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'ai-spend-dev-secret-change-in-prod',
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: { secure: isProd, sameSite: isProd ? 'none' : 'lax', maxAge: 7 * 24 * 60 * 60 * 1000 },
