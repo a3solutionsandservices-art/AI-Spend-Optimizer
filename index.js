@@ -662,11 +662,14 @@ function scanCSV(text) {
   return candidates;
 }
 
-// GET /scan/gmail/debug — shows raw Gmail search results for diagnosis
+// GET /scan/gmail/debug — shows raw Gmail search results for diagnosis (no auth required for debugging)
 app.get('/scan/gmail/debug', async (req, res) => {
-  if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
-  const accessToken = accessTokens[req.user.id];
-  if (!accessToken) return res.status(400).json({ error: 'No access token — sign out and sign in again' });
+  const token = req.query.token;
+  if (!token) return res.json({ error: 'Pass ?token=YOUR_TOKEN in the URL', hint: 'Get your token from localStorage in browser devtools: localStorage.getItem("auth_token")' });
+  const user = await getUserByToken(token);
+  if (!user) return res.json({ error: 'Invalid token — sign out and sign in again' });
+  const accessToken = accessTokens[user.id];
+  if (!accessToken) return res.json({ error: 'No Gmail access token — sign out and sign in again with Google' });
 
   try {
     const query = encodeURIComponent(
