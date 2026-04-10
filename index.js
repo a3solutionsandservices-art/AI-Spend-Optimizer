@@ -21,9 +21,12 @@ async function initDB() {
       email        TEXT,
       avatar       TEXT,
       provider     TEXT,
+      gmail_token  TEXT,
       created_at   TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // Add gmail_token column if it doesn't exist (for existing deployments)
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS gmail_token TEXT`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS subscriptions (
       id                 SERIAL PRIMARY KEY,
@@ -82,12 +85,13 @@ async function deleteSubById(userId, id) {
   return r.rowCount > 0;
 }
 
-async function upsertUserDB({ id, displayName, email, avatar, provider }) {
+async function upsertUserDB({ id, displayName, email, avatar, provider, gmailToken }) {
   await pool.query(
-    `INSERT INTO users (id,display_name,email,avatar,provider)
-     VALUES ($1,$2,$3,$4,$5)
-     ON CONFLICT(id) DO UPDATE SET display_name=$2,email=$3,avatar=$4`,
-    [id, displayName, email, avatar, provider]
+    `INSERT INTO users (id,display_name,email,avatar,provider,gmail_token)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT(id) DO UPDATE SET display_name=$2,email=$3,avatar=$4,
+     gmail_token=COALESCE($6, users.gmail_token)`,
+    [id, displayName, email, avatar, provider, gmailToken||null]
   );
   return { id, displayName, email, avatar, provider };
 }
@@ -96,7 +100,7 @@ async function getUserById(id) {
   const r = await pool.query('SELECT * FROM users WHERE id=$1', [id]);
   if (!r.rows[0]) return null;
   const u = r.rows[0];
-  return { id: u.id, displayName: u.display_name, email: u.email, avatar: u.avatar, provider: u.provider };
+  return { id: u.id, displayName: u.display_name, email: u.email, avatar: u.avatar, provider: u.provider, gmailToken: u.gmail_token };
 }
 
 // ── Signed tokens (survive restarts — no server-side storage needed) ──────────
@@ -180,8 +184,9 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
       email:       profile.emails?.[0]?.value || '',
       avatar:      profile.photos?.[0]?.value || '',
       provider:    'google',
+      gmailToken:  accessToken,
     });
-    accessTokens[user.id] = accessToken;
+    accessTokens[user.id] = accessToken; // also keep in memory for fast access
     done(null, user);
   }));
 }
@@ -710,7 +715,8 @@ app.get('/scan/gmail', async (req, res) => {
   if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
   if (req.user.provider !== 'google') return res.status(400).json({ error: 'Gmail scan requires Google sign-in' });
 
-  const accessToken = accessTokens[req.user.id];
+  // Use in-memory token first, fall back to DB-persisted token
+  const accessToken = accessTokens[req.user.id] || req.user.gmailToken;
   if (!accessToken) return res.status(400).json({ error: 'No Gmail access token — please sign out and sign in again with Google' });
 
   try {
