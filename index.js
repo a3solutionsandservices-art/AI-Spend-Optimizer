@@ -548,19 +548,37 @@ const ALL_VENDORS = [
 const AMOUNT_RE = /\$\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\/\s*(?:mo(?:nth)?|month|yr|year))?/gi;
 const VENDOR_CONFIDENCE = { exact: 0.95, partial: 0.75, amount_only: 0.5 };
 
+// Lines containing these words are receipt noise — skip them
+const NOISE_WORDS = [
+  'tax', 'vat', 'gst', 'hst', 'fee', 'fees', 'discount', 'credit',
+  'refund', 'shipping', 'handling', 'subtotal', 'sub-total',
+  'processing', 'convenience fee', 'service fee', 'promo', 'coupon',
+  'cashback', 'reward', 'points', 'gift card', 'balance',
+  'previous balance', 'payment received', 'thank you',
+];
+
+// Lines with these words are strong signals for the final bill total
+const TOTAL_WORDS = ['total', 'amount due', 'amount charged', 'billed', 'charged', 'invoice total', 'grand total', 'you paid', 'payment'];
+
 function normalizeCost(raw) {
-  // Convert yearly to monthly if hinted
   return parseFloat(String(raw).replace(/,/g, '')) || 0;
 }
 
 function scanText(text) {
-  const candidates = [];
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+  // Map: vendorKey → { name, bestCost, bestEvidence, isTotal, confidence }
+  const vendorMap = new Map();
+  // For vendor-less amounts we collect separately then prune
+  const noVendorAmounts = [];
 
   for (const line of lines) {
     const lower = line.toLowerCase();
 
-    // Find amount in line
+    // Skip noise lines (tax, fee, discount, etc.)
+    if (NOISE_WORDS.some(w => lower.includes(w))) continue;
+
+    // Find dollar amount in line
     AMOUNT_RE.lastIndex = 0;
     const amtMatch = AMOUNT_RE.exec(line);
     const cost = amtMatch ? normalizeCost(amtMatch[1]) : null;
@@ -568,46 +586,76 @@ function scanText(text) {
     // Find vendor in line
     const vendor = ALL_VENDORS.find(v => lower.includes(v));
 
-    if (!vendor && cost === null) continue; // nothing useful
+    if (!vendor && cost === null) continue;
 
-    let name = vendor
-      ? vendor.split(' ').map(w => w[0].toUpperCase() + w.slice(1)).join(' ')
-      : null;
-    const confidence = vendor && cost !== null
-      ? VENDOR_CONFIDENCE.exact
-      : vendor
-      ? VENDOR_CONFIDENCE.partial
-      : VENDOR_CONFIDENCE.amount_only;
+    const isTotal = TOTAL_WORDS.some(w => lower.includes(w));
 
-    // If no vendor found but there's an amount, use surrounding text as name hint
-    if (!name) {
-      name = line.replace(AMOUNT_RE, '').replace(/[^a-zA-Z0-9 ]/g, ' ').trim().slice(0, 40) || 'Unknown';
+    if (vendor) {
+      const key = vendor.toLowerCase();
+      const displayName = vendor.split(' ').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
+      const existing = vendorMap.get(key);
+
+      if (!existing) {
+        vendorMap.set(key, {
+          name: displayName,
+          cost: cost || 0,
+          isTotal,
+          confidence: cost !== null ? VENDOR_CONFIDENCE.exact : VENDOR_CONFIDENCE.partial,
+          evidence: line.slice(0, 120),
+        });
+      } else {
+        // Prefer "total" lines; otherwise prefer the largest amount (final bill > line items)
+        const shouldReplace =
+          (isTotal && !existing.isTotal) ||
+          (isTotal === existing.isTotal && cost !== null && cost > existing.cost);
+        if (shouldReplace) {
+          vendorMap.set(key, {
+            name: displayName,
+            cost: cost !== null ? cost : existing.cost,
+            isTotal,
+            confidence: cost !== null ? VENDOR_CONFIDENCE.exact : VENDOR_CONFIDENCE.partial,
+            evidence: line.slice(0, 120),
+          });
+        }
+      }
+    } else if (cost !== null && cost > 0) {
+      // No vendor matched — only keep if it looks like a subscription total
+      if (isTotal || cost >= 5) {
+        noVendorAmounts.push({ line, cost, isTotal });
+      }
     }
+  }
 
+  // Build final candidates from vendor map
+  const candidates = [];
+
+  for (const [, entry] of vendorMap) {
+    const { name, cost, confidence, evidence } = entry;
     const category = detectCategory(name) || 'other';
-    const { planName, usageHint } = detectPlan(name, cost || 0);
-
+    const { planName, usageHint } = detectPlan(name, cost);
     candidates.push({
       id: `cand-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      name,
-      cost: cost || 0,
-      category,
-      planName,
-      usageHint,
-      confidence,
-      evidence: line.slice(0, 120),
-      source: 'text',
+      name, cost, category, planName, usageHint, confidence, evidence, source: 'text',
     });
   }
 
-  // Deduplicate by lowercased name
-  const seen = new Set();
-  return candidates.filter(c => {
-    const key = c.name.toLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  // Add vendor-less amounts only if no vendor candidates were found at all (pure amount-only doc)
+  if (candidates.length === 0) {
+    for (const { line, cost } of noVendorAmounts) {
+      const name = line.replace(AMOUNT_RE, '').replace(/[^a-zA-Z0-9 ]/g, ' ').trim().slice(0, 40) || 'Unknown Service';
+      const category = detectCategory(name) || 'other';
+      const { planName, usageHint } = detectPlan(name, cost);
+      candidates.push({
+        id: `cand-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name, cost, category, planName, usageHint,
+        confidence: VENDOR_CONFIDENCE.amount_only,
+        evidence: line.slice(0, 120),
+        source: 'text',
+      });
+    }
+  }
+
+  return candidates;
 }
 
 function scanCSV(text) {
