@@ -532,21 +532,37 @@ app.post('/subscriptions', async (req, res) => {
 
 // All known vendor names for text scanning (lower-case)
 const ALL_VENDORS = [
-  'chatgpt', 'openai', 'claude', 'anthropic', 'gemini', 'google one',
-  'cursor', 'github copilot', 'copilot', 'tabnine', 'codeium', 'replit',
-  'midjourney', 'dall-e', 'dalle', 'stable diffusion', 'firefly', 'runway',
+  // LLM / chat
+  'chatgpt', 'openai', 'claude', 'anthropic', 'gemini', 'google one', 'google workspace',
+  'grok', 'xai', 'mistral', 'cohere', 'together ai', 'togetherai', 'groq', 'fireworks',
+  'poe', 'character.ai', 'pi.ai', 'inflection',
+  // coding
+  'cursor', 'github copilot', 'copilot', 'tabnine', 'codeium', 'codium',
+  'replit', 'cody', 'amazon codewhisperer', 'codewhisperer', 'sourcegraph',
+  'blackbox', 'deepseek', 'devin', 'aider', 'continue', 'supermaven', 'windsurf',
+  'bolt', 'v0', 'lovable', 'same.dev',
+  // image / video / design
+  'midjourney', 'dall-e', 'dalle', 'stable diffusion', 'adobe firefly', 'firefly',
   'canva', 'ideogram', 'leonardo', 'heygen', 'synthesia', 'pika', 'kling',
-  'perplexity', 'elicit', 'consensus', 'you.com',
+  'runway', 'sora', 'luma', 'udio', 'suno', 'adobe',
+  // writing / content
   'jasper', 'copy.ai', 'copyai', 'writesonic', 'grammarly', 'quillbot',
-  'notion', 'notion ai', 'lex', 'anyword', 'rytr', 'wordtune',
-  'sourcegraph', 'cody', 'blackbox', 'deepseek', 'devin', 'aider',
+  'notion', 'notion ai', 'lex', 'anyword', 'rytr', 'wordtune', 'hyperwrite',
+  'simplified', 'longshot', 'cohesive',
+  // research / search
+  'perplexity', 'elicit', 'consensus', 'you.com', 'bing', 'you',
+  // audio / voice
   'eleven labs', 'elevenlabs', 'murf', 'descript', 'otter', 'fireflies',
+  'adobe podcast', 'adobepodcast', 'whisper',
+  // productivity / agents
   'tome', 'gamma', 'beautiful.ai', 'pitch', 'slides ai',
-  'zapier', 'make', 'n8n', 'activepieces',
+  'zapier', 'make', 'n8n', 'activepieces', 'lindy', 'bardeen',
+  // data / analytics
+  'julius', 'rows', 'akkio', 'obviously ai',
 ];
 
 const AMOUNT_RE = /\$\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\/\s*(?:mo(?:nth)?|month|yr|year))?/gi;
-const VENDOR_CONFIDENCE = { exact: 0.95, partial: 0.75, amount_only: 0.5 };
+const VENDOR_CONFIDENCE = { exact: 0.95, extracted: 0.80, partial: 0.75, amount_only: 0.5 };
 
 // Lines containing these words are receipt noise — skip them
 const NOISE_WORDS = [
@@ -557,25 +573,79 @@ const NOISE_WORDS = [
   'previous balance', 'payment received', 'thank you',
 ];
 
-// Lines with these words are strong signals for the final bill total
+// Lines with these words signal the final bill total
 const TOTAL_WORDS = ['total', 'amount due', 'amount charged', 'billed', 'charged', 'invoice total', 'grand total', 'you paid', 'payment'];
+
+// Keywords that hint at category when tool name is unknown
+const CAT_KEYWORD_MAP = {
+  writing:  ['writing', 'content', 'copywriting', 'blog', 'essay', 'article', 'email assistant', 'grammar', 'paraphrase', 'summarize'],
+  coding:   ['code', 'coding', 'developer', 'ide', 'github', 'programming', 'autocomplete', 'copilot', 'debugging'],
+  design:   ['design', 'image', 'photo', 'illustration', 'video', 'animation', 'creative', 'visual', 'avatar', 'logo', 'art'],
+  research: ['research', 'search', 'knowledge', 'academic', 'papers', 'data', 'analytics', 'insights'],
+  audio:    ['audio', 'voice', 'speech', 'transcription', 'podcast', 'music', 'sound'],
+  other:    [],
+};
 
 function normalizeCost(raw) {
   return parseFloat(String(raw).replace(/,/g, '')) || 0;
 }
 
+/**
+ * Try to extract a clean tool/service name from a line or from the full document.
+ * Looks for receipt patterns: "from:", "billed by:", "subscription to X", domain in email, etc.
+ */
+function extractNameFromContext(line, fullText) {
+  const lower = line.toLowerCase();
+
+  // Pattern: "Receipt from Company", "Invoice from Company", "Payment to Company"
+  const fromMatch = line.match(/(?:receipt|invoice|payment|bill|charge|subscription)\s+(?:from|to|by|for)\s+([A-Z][A-Za-z0-9 .&''\-]{1,40})/i);
+  if (fromMatch) return fromMatch[1].trim();
+
+  // Pattern: "Company subscription", "Company Pro Plan", "Company Plus"
+  const subMatch = line.match(/^([A-Z][A-Za-z0-9 .&''\-]{1,30})\s+(?:subscription|plan|pro|plus|premium|basic|standard|team|business|enterprise)/i);
+  if (subMatch) return subMatch[1].trim();
+
+  // Pattern: billing email sender domain — e.g. "From: billing@notion.so" → "Notion"
+  const emailMatch = (fullText || line).match(/From:\s*[^\n<]*?(?:billing|receipt|invoice|noreply|no-reply|support|hello|hi|team)@([a-zA-Z0-9][a-zA-Z0-9\-]{1,30})\.[a-z]{2,}/i);
+  if (emailMatch) {
+    const domain = emailMatch[1];
+    return domain.charAt(0).toUpperCase() + domain.slice(1);
+  }
+
+  // Pattern: "Company.com" or "Company Inc" capitalized near amount
+  const capMatch = line.match(/([A-Z][a-zA-Z0-9]{2,20})(?:\.(?:com|io|ai|co|app|dev)|\s+(?:Inc|LLC|Ltd|Corp))/);
+  if (capMatch) return capMatch[1].trim();
+
+  // Fallback: take first run of capitalized words from the line
+  const clean = line.replace(AMOUNT_RE, '').replace(/[^a-zA-Z0-9 ]/g, ' ').trim();
+  const capWords = clean.match(/\b[A-Z][a-zA-Z0-9]{2,}\b/g);
+  if (capWords && capWords.length > 0) return capWords.slice(0, 2).join(' ');
+
+  return null;
+}
+
+/**
+ * Guess category from keywords in the surrounding receipt text when tool is unknown.
+ */
+function guessCategory(name, contextText) {
+  const haystack = ((name || '') + ' ' + (contextText || '')).toLowerCase();
+  for (const [cat, keywords] of Object.entries(CAT_KEYWORD_MAP)) {
+    if (keywords.some(kw => haystack.includes(kw))) return cat;
+  }
+  return 'other';
+}
+
 function scanText(text) {
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
 
-  // Map: vendorKey → { name, bestCost, bestEvidence, isTotal, confidence }
+  // Map: vendorKey → { name, cost, isTotal, confidence, evidence }
   const vendorMap = new Map();
-  // For vendor-less amounts we collect separately then prune
   const noVendorAmounts = [];
 
   for (const line of lines) {
     const lower = line.toLowerCase();
 
-    // Skip noise lines (tax, fee, discount, etc.)
+    // Skip noise lines
     if (NOISE_WORDS.some(w => lower.includes(w))) continue;
 
     // Find dollar amount in line
@@ -583,74 +653,77 @@ function scanText(text) {
     const amtMatch = AMOUNT_RE.exec(line);
     const cost = amtMatch ? normalizeCost(amtMatch[1]) : null;
 
-    // Find vendor in line
+    // Find known vendor
     const vendor = ALL_VENDORS.find(v => lower.includes(v));
-
-    if (!vendor && cost === null) continue;
-
     const isTotal = TOTAL_WORDS.some(w => lower.includes(w));
 
     if (vendor) {
       const key = vendor.toLowerCase();
       const displayName = vendor.split(' ').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
       const existing = vendorMap.get(key);
-
-      if (!existing) {
+      const shouldReplace = !existing ||
+        (isTotal && !existing.isTotal) ||
+        (isTotal === existing.isTotal && cost !== null && cost > (existing.cost || 0));
+      if (shouldReplace) {
         vendorMap.set(key, {
           name: displayName,
-          cost: cost || 0,
+          cost: cost != null ? cost : (existing?.cost || 0),
           isTotal,
           confidence: cost !== null ? VENDOR_CONFIDENCE.exact : VENDOR_CONFIDENCE.partial,
           evidence: line.slice(0, 120),
+          knownVendor: true,
         });
-      } else {
-        // Prefer "total" lines; otherwise prefer the largest amount (final bill > line items)
-        const shouldReplace =
-          (isTotal && !existing.isTotal) ||
-          (isTotal === existing.isTotal && cost !== null && cost > existing.cost);
-        if (shouldReplace) {
-          vendorMap.set(key, {
-            name: displayName,
-            cost: cost !== null ? cost : existing.cost,
-            isTotal,
-            confidence: cost !== null ? VENDOR_CONFIDENCE.exact : VENDOR_CONFIDENCE.partial,
-            evidence: line.slice(0, 120),
-          });
-        }
       }
     } else if (cost !== null && cost > 0) {
-      // No vendor matched — only keep if it looks like a subscription total
-      if (isTotal || cost >= 5) {
+      // Unknown vendor — try to extract name from this line + full doc
+      const extractedName = extractNameFromContext(line, text);
+      if (extractedName) {
+        const key = extractedName.toLowerCase();
+        const existing = vendorMap.get(key);
+        const shouldReplace = !existing ||
+          (isTotal && !existing.isTotal) ||
+          (isTotal === existing.isTotal && cost > (existing.cost || 0));
+        if (shouldReplace) {
+          vendorMap.set(key, {
+            name: extractedName,
+            cost,
+            isTotal,
+            confidence: VENDOR_CONFIDENCE.extracted,
+            evidence: line.slice(0, 120),
+            knownVendor: false,
+          });
+        }
+      } else if (isTotal || cost >= 5) {
         noVendorAmounts.push({ line, cost, isTotal });
       }
     }
   }
 
-  // Build final candidates from vendor map
   const candidates = [];
 
   for (const [, entry] of vendorMap) {
-    const { name, cost, confidence, evidence } = entry;
-    const category = detectCategory(name) || 'other';
+    const { name, cost, confidence, evidence, knownVendor } = entry;
+    // Use guessCategory for unknown vendors to improve category detection
+    const category = detectCategory(name) || (knownVendor ? 'other' : guessCategory(name, text));
     const { planName, usageHint } = detectPlan(name, cost);
     candidates.push({
       id: `cand-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      name, cost, category, planName, usageHint, confidence, evidence, source: 'text',
+      name, cost, category, planName, usageHint, confidence, evidence, source: 'scan',
     });
   }
 
-  // Add vendor-less amounts only if no vendor candidates were found at all (pure amount-only doc)
+  // Last resort: vendor-less amounts only if nothing else was found
   if (candidates.length === 0) {
-    for (const { line, cost } of noVendorAmounts) {
+    for (const { line, cost } of noVendorAmounts.slice(0, 5)) {
       const name = line.replace(AMOUNT_RE, '').replace(/[^a-zA-Z0-9 ]/g, ' ').trim().slice(0, 40) || 'Unknown Service';
-      const category = detectCategory(name) || 'other';
+      const category = guessCategory(name, text);
       const { planName, usageHint } = detectPlan(name, cost);
       candidates.push({
         id: `cand-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         name, cost, category, planName, usageHint,
         confidence: VENDOR_CONFIDENCE.amount_only,
         evidence: line.slice(0, 120),
-        source: 'text',
+        source: 'scan',
       });
     }
   }
