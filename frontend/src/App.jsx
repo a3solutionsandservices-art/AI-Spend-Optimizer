@@ -667,7 +667,6 @@ export default function App() {
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-base font-bold text-slate-900">AI Spend Optimizer</h1>
-                <span className="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded-full font-semibold tracking-wide">BETA</span>
               </div>
               <p className="text-xs text-slate-400 hidden sm:block">Track · Optimize · Save on your AI stack</p>
             </div>
@@ -737,7 +736,7 @@ export default function App() {
       )}
 
       {/* ── Main content ── */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 pb-20">
         <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-6">
 
           {/* ── LEFT COLUMN ── */}
@@ -1031,6 +1030,18 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* ── Footer ── */}
+      <footer className="fixed bottom-0 inset-x-0 border-t border-slate-200 bg-white/90 backdrop-blur-sm z-30">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-10 flex items-center justify-between">
+          <p className="text-xs text-slate-400">© {new Date().getFullYear()} AI Spend Optimizer · Your data is private and never sold.</p>
+          <div className="flex items-center gap-4">
+            <a href="mailto:support@aispendoptimizer.com" className="text-xs text-slate-400 hover:text-slate-600">Support</a>
+            <span className="text-slate-200">|</span>
+            <a href="#" className="text-xs text-slate-400 hover:text-slate-600">Privacy</a>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
