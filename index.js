@@ -749,25 +749,44 @@ function scanText(text) {
     return null;
   })();
 
-  for (const line of lines) {
+  // Helper: check if a line is noise/date/metadata
+  const isNoiseLine = (l) => {
+    const lo = l.toLowerCase();
+    if (NOISE_WORDS.some(w => lo.includes(w))) return true;
+    const s = l.replace(/\$[\d,.]+/g, '').trim();
+    if (/^[\d\/\-\.]+$/.test(s)) return true;
+    if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d/i.test(s)) return true;
+    return false;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const lower = line.toLowerCase();
 
-    // Skip noise lines
-    if (NOISE_WORDS.some(w => lower.includes(w))) continue;
+    if (isNoiseLine(line)) continue;
 
-    // Skip lines that are just dates or numbers (e.g. "March 28, 2026", "04/01/2026")
-    const stripped = line.replace(/\$[\d,.]+/g, '').trim();
-    if (/^[\d\/\-\.]+$/.test(stripped)) continue;
-    if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d/i.test(stripped)) continue;
-
-    const cost = matchAmount(line);
+    let cost = matchAmount(line);
     const isTotal = TOTAL_WORDS.some(w => lower.includes(w));
+
+    // If no amount on this line, look ahead up to 2 lines for a standalone amount
+    // (handles receipts where tool name and price are on separate lines)
+    if (cost === null) {
+      for (let j = i + 1; j <= i + 2 && j < lines.length; j++) {
+        const nextLine = lines[j];
+        if (isNoiseLine(nextLine)) continue;
+        const nextAmt = matchAmount(nextLine);
+        // Only use next line's amount if that line has no vendor of its own
+        if (nextAmt !== null && !resolveVendorName(nextLine.toLowerCase())) {
+          cost = nextAmt;
+          break;
+        }
+      }
+    }
 
     // 1. Try known vendor/billing-name map first
     const knownName = resolveVendorName(lower);
 
     // 2. For lines with a dollar amount, also try structured extraction
-    //    but ONLY if the line contains subscription-like keywords or is a total line
     const isSubLine = isTotal ||
       /subscri|plan|member|billed|renewal|monthly|annually|yearly|invoic/i.test(line);
 
@@ -776,7 +795,6 @@ function scanText(text) {
       : null;
 
     const resolvedName = knownName || extractedName
-      // Last resort: use document-level vendor only on total/amount-due lines
       || (docVendor && isTotal && cost !== null ? docVendor : null);
 
     if (resolvedName) {
