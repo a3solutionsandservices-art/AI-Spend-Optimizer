@@ -621,11 +621,21 @@ const BILLING_NAME_MAP = {
 
 // Lines containing these words are receipt noise — skip them
 const NOISE_WORDS = [
+  // financial noise
   'tax', 'vat', 'gst', 'hst', 'fee', 'fees', 'discount', 'credit',
   'refund', 'shipping', 'handling', 'subtotal', 'sub-total',
   'processing', 'convenience fee', 'service fee', 'promo', 'coupon',
   'cashback', 'reward', 'points', 'gift card', 'balance',
   'previous balance', 'payment received', 'thank you',
+  // receipt metadata — dates, amounts, labels
+  'amount paid', 'amount charged', 'amount billed', 'total paid',
+  'paid on', 'paid at', 'payment date', 'billing date', 'invoice date',
+  'date of payment', 'transaction date', 'order date',
+  'due date', 'renewal date', 'next billing',
+  'invoice number', 'order number', 'receipt number', 'transaction id',
+  'billing address', 'ship to', 'bill to',
+  'quantity', 'qty', 'unit price', 'price per',
+  'account ending', 'card ending', 'visa', 'mastercard', 'amex',
 ];
 
 // Lines with these words signal the final bill total
@@ -744,6 +754,11 @@ function scanText(text) {
 
     // Skip noise lines
     if (NOISE_WORDS.some(w => lower.includes(w))) continue;
+
+    // Skip lines that are just dates or numbers (e.g. "March 28, 2026", "04/01/2026")
+    const stripped = line.replace(/\$[\d,.]+/g, '').trim();
+    if (/^[\d\/\-\.]+$/.test(stripped)) continue;
+    if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d/i.test(stripped)) continue;
 
     const cost = matchAmount(line);
     const isTotal = TOTAL_WORDS.some(w => lower.includes(w));
