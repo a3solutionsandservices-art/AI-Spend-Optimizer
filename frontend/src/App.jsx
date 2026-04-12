@@ -648,7 +648,7 @@ export default function App() {
     );
   }
 
-  if (authRequired && !user) return <AuthScreen />;
+  if (!user) return <AuthScreen />;
 
   return (
     <div className="min-h-screen bg-slate-50">
