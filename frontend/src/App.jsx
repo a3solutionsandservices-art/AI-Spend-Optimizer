@@ -61,7 +61,7 @@ function useAuth() {
   const logout = () => {
     clearToken();
     setUser(null);
-    window.location.href = `${API}/auth/logout`;
+    setAuthRequired(true);
   };
 
   return { user, checking, authRequired, logout };
@@ -651,50 +651,60 @@ export default function App() {
   if (authRequired && !user) return <AuthScreen />;
 
   return (
-    <div className="min-h-screen" style={{ background: '#F5F7FA' }}>
+    <div className="min-h-screen bg-slate-50">
       {/* ── Header ── */}
-      <header className="sticky top-0 z-40 border-b bg-white/95 backdrop-blur-sm shadow-sm">
+      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          {/* Left: logo + title */}
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
-              style={{ background: 'linear-gradient(135deg, #1E3A8A, #1e40af)' }}>
+              style={{ background: 'linear-gradient(135deg, #1E3A8A, #2563eb)' }}>
               <svg width="20" height="20" viewBox="0 0 36 36" fill="none">
-                <circle cx="16" cy="16" r="7" stroke="white" strokeWidth="2.2" fill="none" opacity="0.9"/>
+                <circle cx="16" cy="16" r="7" stroke="white" strokeWidth="2.2" fill="none"/>
                 <line x1="21" y1="21" x2="27" y2="27" stroke="white" strokeWidth="2.4" strokeLinecap="round"/>
-                <text x="16" y="20" textAnchor="middle" fill="white" fontSize="9" fontWeight="800" fontFamily="Inter, sans-serif">$</text>
+                <text x="16" y="20" textAnchor="middle" fill="white" fontSize="9" fontWeight="800" fontFamily="Inter,sans-serif">$</text>
               </svg>
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold text-slate-900 leading-tight">AI Spend Optimizer</h1>
-                <span className="text-xs bg-blue-100 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded-full font-medium">Beta</span>
+                <h1 className="text-base font-bold text-slate-900">AI Spend Optimizer</h1>
+                <span className="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded-full font-semibold tracking-wide">BETA</span>
               </div>
-              <p className="text-xs text-slate-500 leading-none mt-0.5 hidden sm:block">Track · Optimize · Save</p>
+              <p className="text-xs text-slate-400 hidden sm:block">Track · Optimize · Save on your AI stack</p>
             </div>
           </div>
-
-          {/* Right: spend stat + user */}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             {tools.length > 0 && insights && (
-              <div className="hidden sm:flex flex-col items-end">
-                <span className="text-xs text-slate-400 font-medium uppercase tracking-wide">Monthly Spend</span>
-                <span className="text-lg font-bold text-slate-900 leading-tight">${animatedSpend.toFixed(2)}</span>
+              <div className="hidden sm:flex items-center gap-2 bg-blue-50 border border-blue-100 rounded-xl px-4 py-2">
+                <TrendingDown className="w-4 h-4 text-blue-600" />
+                <div>
+                  <div className="text-[10px] text-blue-500 font-semibold uppercase tracking-wider">Monthly Spend</div>
+                  <div className="text-lg font-bold text-blue-900 leading-tight">${animatedSpend.toFixed(2)}</div>
+                </div>
+                {insights.potentialSavings > 0 && (
+                  <>
+                    <Separator orientation="vertical" className="h-8 mx-1" />
+                    <div>
+                      <div className="text-[10px] text-emerald-500 font-semibold uppercase tracking-wider">Potential Savings</div>
+                      <div className="text-lg font-bold text-emerald-700 leading-tight">-${insights.potentialSavings.toFixed(2)}</div>
+                    </div>
+                  </>
+                )}
               </div>
             )}
             {user && (
-              <div className="flex items-center gap-2">
-                <Avatar className="w-8 h-8">
+              <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl pl-1 pr-3 py-1">
+                <Avatar className="w-7 h-7">
                   {user.avatar && <AvatarImage src={user.avatar} alt={user.displayName} />}
-                  <AvatarFallback className="text-xs font-semibold bg-blue-100 text-blue-800">
+                  <AvatarFallback className="text-xs font-bold bg-blue-100 text-blue-800">
                     {user.displayName?.[0]?.toUpperCase() || '?'}
                   </AvatarFallback>
                 </Avatar>
                 <span className="text-sm font-medium text-slate-700 hidden sm:block">
                   {user.displayName?.split(' ')[0]}
                 </span>
-                <Button variant="ghost" size="sm" onClick={logout} className="text-slate-500 hover:text-slate-900 px-2">
-                  <LogOut className="w-4 h-4" />
+                <Button variant="ghost" size="sm" onClick={logout} title="Sign out"
+                  className="h-7 w-7 p-0 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg ml-1">
+                  <LogOut className="w-3.5 h-3.5" />
                 </Button>
               </div>
             )}
@@ -702,9 +712,33 @@ export default function App() {
         </div>
       </header>
 
+      {/* ── Hero stats bar (shown when tools exist) ── */}
+      {tools.length > 0 && insights && (
+        <div style={{ background: 'linear-gradient(135deg, #1E3A8A 0%, #1d4ed8 100%)' }} className="text-white">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="text-center">
+              <div className="text-2xl font-bold">${animatedSpend.toFixed(2)}</div>
+              <div className="text-blue-200 text-xs font-medium mt-0.5">Monthly Spend</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold">{tools.length}</div>
+              <div className="text-blue-200 text-xs font-medium mt-0.5">AI Tools</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-emerald-300">${insights.potentialSavings.toFixed(2)}</div>
+              <div className="text-blue-200 text-xs font-medium mt-0.5">Potential Savings</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold">{Object.keys(insights.byCategory || {}).length}</div>
+              <div className="text-blue-200 text-xs font-medium mt-0.5">Categories</div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Main content ── */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-[400px_1fr] gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-6">
 
           {/* ── LEFT COLUMN ── */}
           <div className="flex flex-col gap-5">
