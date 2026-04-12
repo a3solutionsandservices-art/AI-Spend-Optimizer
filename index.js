@@ -561,8 +561,63 @@ const ALL_VENDORS = [
   'julius', 'rows', 'akkio', 'obviously ai',
 ];
 
-const AMOUNT_RE = /\$\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\/\s*(?:mo(?:nth)?|month|yr|year))?/gi;
+// Use a non-global regex factory to avoid lastIndex bugs
+function matchAmount(line) {
+  const m = line.match(/\$\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\/\s*(?:mo(?:nth)?|month|yr|year))?/i);
+  return m ? parseFloat(m[1].replace(/,/g, '')) || 0 : null;
+}
+
 const VENDOR_CONFIDENCE = { exact: 0.95, extracted: 0.80, partial: 0.75, amount_only: 0.5 };
+
+// Maps legal/billing names and CC statement codes → canonical product name
+const BILLING_NAME_MAP = {
+  // OpenAI / ChatGPT
+  'openai': 'ChatGPT', 'openai llc': 'ChatGPT', 'openai inc': 'ChatGPT',
+  'openai *chatgpt': 'ChatGPT', 'openai* chatgpt': 'ChatGPT',
+  'chatgpt plus': 'ChatGPT', 'chatgpt pro': 'ChatGPT',
+  // Anthropic / Claude
+  'anthropic': 'Claude', 'anthropic pbc': 'Claude', 'anthropic inc': 'Claude',
+  'anthropic *claude': 'Claude', 'claude pro': 'Claude', 'claude.ai': 'Claude',
+  // GitHub Copilot
+  'github': 'GitHub Copilot', 'github inc': 'GitHub Copilot',
+  'github.com': 'GitHub Copilot', 'github *copilot': 'GitHub Copilot',
+  'github copilot': 'GitHub Copilot',
+  // Cursor
+  'cursor': 'Cursor', 'anysphere': 'Cursor', 'anysphere inc': 'Cursor',
+  // Midjourney
+  'midjourney': 'Midjourney', 'midjourney inc': 'Midjourney',
+  'midjourney *sub': 'Midjourney',
+  // Notion
+  'notion': 'Notion', 'notion labs': 'Notion', 'notion inc': 'Notion',
+  // Grammarly
+  'grammarly': 'Grammarly', 'grammarly inc': 'Grammarly',
+  // Perplexity
+  'perplexity': 'Perplexity', 'perplexity ai': 'Perplexity',
+  // ElevenLabs
+  'elevenlabs': 'ElevenLabs', 'eleven labs': 'ElevenLabs',
+  // Canva
+  'canva': 'Canva', 'canva pty': 'Canva',
+  // Runway
+  'runway': 'Runway', 'runway ml': 'Runway',
+  // Replit
+  'replit': 'Replit', 'replit inc': 'Replit',
+  // Jasper
+  'jasper': 'Jasper', 'jasper ai': 'Jasper',
+  // Zapier
+  'zapier': 'Zapier', 'zapier inc': 'Zapier',
+  // Otter
+  'otter': 'Otter.ai', 'otter.ai': 'Otter.ai', 'aisense': 'Otter.ai',
+  // Descript
+  'descript': 'Descript',
+  // Copy.ai
+  'copy.ai': 'Copy.ai', 'copyai': 'Copy.ai',
+  // Writesonic
+  'writesonic': 'Writesonic',
+  // Deepseek
+  'deepseek': 'DeepSeek',
+  // Gemini / Google
+  'google one': 'Google One', 'google workspace': 'Google Workspace',
+};
 
 // Lines containing these words are receipt noise — skip them
 const NOISE_WORDS = [
@@ -578,8 +633,8 @@ const TOTAL_WORDS = ['total', 'amount due', 'amount charged', 'billed', 'charged
 
 // Keywords that hint at category when tool name is unknown
 const CAT_KEYWORD_MAP = {
-  writing:  ['writing', 'content', 'copywriting', 'blog', 'essay', 'article', 'email assistant', 'grammar', 'paraphrase', 'summarize'],
-  coding:   ['code', 'coding', 'developer', 'ide', 'github', 'programming', 'autocomplete', 'copilot', 'debugging'],
+  writing:  ['writing', 'content', 'copywriting', 'blog', 'essay', 'article', 'grammar', 'paraphrase', 'summarize', 'copy'],
+  coding:   ['code', 'coding', 'developer', 'ide', 'github', 'programming', 'autocomplete', 'copilot', 'debugging', 'repo'],
   design:   ['design', 'image', 'photo', 'illustration', 'video', 'animation', 'creative', 'visual', 'avatar', 'logo', 'art'],
   research: ['research', 'search', 'knowledge', 'academic', 'papers', 'data', 'analytics', 'insights'],
   audio:    ['audio', 'voice', 'speech', 'transcription', 'podcast', 'music', 'sound'],
@@ -591,35 +646,65 @@ function normalizeCost(raw) {
 }
 
 /**
- * Try to extract a clean tool/service name from a line or from the full document.
- * Looks for receipt patterns: "from:", "billed by:", "subscription to X", domain in email, etc.
+ * Resolve a raw billing string to a canonical product name.
+ * Handles: exact map lookup, partial match, CC asterisk notation, domain names.
  */
-function extractNameFromContext(line, fullText) {
-  const lower = line.toLowerCase();
+function resolveVendorName(raw) {
+  const lower = raw.toLowerCase().trim();
 
-  // Pattern: "Receipt from Company", "Invoice from Company", "Payment to Company"
-  const fromMatch = line.match(/(?:receipt|invoice|payment|bill|charge|subscription)\s+(?:from|to|by|for)\s+([A-Z][A-Za-z0-9 .&''\-]{1,40})/i);
-  if (fromMatch) return fromMatch[1].trim();
+  // Direct map lookup
+  if (BILLING_NAME_MAP[lower]) return BILLING_NAME_MAP[lower];
 
-  // Pattern: "Company subscription", "Company Pro Plan", "Company Plus"
-  const subMatch = line.match(/^([A-Z][A-Za-z0-9 .&''\-]{1,30})\s+(?:subscription|plan|pro|plus|premium|basic|standard|team|business|enterprise)/i);
-  if (subMatch) return subMatch[1].trim();
-
-  // Pattern: billing email sender domain — e.g. "From: billing@notion.so" → "Notion"
-  const emailMatch = (fullText || line).match(/From:\s*[^\n<]*?(?:billing|receipt|invoice|noreply|no-reply|support|hello|hi|team)@([a-zA-Z0-9][a-zA-Z0-9\-]{1,30})\.[a-z]{2,}/i);
-  if (emailMatch) {
-    const domain = emailMatch[1];
-    return domain.charAt(0).toUpperCase() + domain.slice(1);
+  // Partial map lookup — e.g. "OPENAI *CHATGPT 04/01" → "openai" matches
+  for (const [key, canonical] of Object.entries(BILLING_NAME_MAP)) {
+    if (lower.includes(key)) return canonical;
   }
 
-  // Pattern: "Company.com" or "Company Inc" capitalized near amount
-  const capMatch = line.match(/([A-Z][a-zA-Z0-9]{2,20})(?:\.(?:com|io|ai|co|app|dev)|\s+(?:Inc|LLC|Ltd|Corp))/);
-  if (capMatch) return capMatch[1].trim();
+  // Known vendor list match
+  const vendor = ALL_VENDORS.find(v => lower.includes(v));
+  if (vendor) return vendor.split(' ').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
 
-  // Fallback: take first run of capitalized words from the line
-  const clean = line.replace(AMOUNT_RE, '').replace(/[^a-zA-Z0-9 ]/g, ' ').trim();
+  return null;
+}
+
+/**
+ * Try to extract a clean tool/service name from a receipt line + document context.
+ */
+function extractNameFromContext(line, fullText) {
+  // CC asterisk notation: "OPENAI *CHATGPT" or "GITHUB.COM/COPILOT"
+  const ccMatch = line.match(/^([A-Z][A-Z0-9 .]{2,20})\s*[*/]([A-Z][A-Z0-9 ]{2,20})/i);
+  if (ccMatch) {
+    const resolved = resolveVendorName(ccMatch[1]) || resolveVendorName(ccMatch[2]);
+    if (resolved) return resolved;
+    return ccMatch[2].trim(); // use the part after * as product name
+  }
+
+  // "Receipt from Company", "Invoice from Company", "Payment to Company"
+  const fromMatch = line.match(/(?:receipt|invoice|payment|bill|charge|subscription)\s+(?:from|to|by|for)\s+([A-Za-z][A-Za-z0-9 .&'\-]{1,40})/i);
+  if (fromMatch) return resolveVendorName(fromMatch[1]) || fromMatch[1].trim();
+
+  // "Company subscription", "Company Pro Plan", "Company Plus membership"
+  const subMatch = line.match(/^([A-Za-z][A-Za-z0-9 .&'\-]{1,30}?)\s+(?:subscription|plan|pro|plus|premium|basic|standard|team|business|enterprise|membership)/i);
+  if (subMatch) return resolveVendorName(subMatch[1]) || subMatch[1].trim();
+
+  // Billing email sender: "From: billing@notion.so" → "Notion"
+  const emailMatch = (fullText || '').match(/From:[^\n]*?[\w.+\-]+@([\w\-]{2,30})\.(com|io|ai|co|app|dev|net|org)/i);
+  if (emailMatch) {
+    const domain = emailMatch[1].replace(/-/g, ' ');
+    return resolveVendorName(domain) || (domain.charAt(0).toUpperCase() + domain.slice(1));
+  }
+
+  // "Company.com" or "Company Inc/LLC" in line
+  const corpMatch = line.match(/([A-Z][a-zA-Z0-9]{2,20})(?:\.(?:com|io|ai|co|app|dev)|\s+(?:Inc|LLC|Ltd|Corp|PBC)\.?)/i);
+  if (corpMatch) return resolveVendorName(corpMatch[1]) || corpMatch[1].trim();
+
+  // Fallback: first capitalized word(s) after stripping amounts and symbols
+  const clean = line.replace(/\$[\d,.]+/g, '').replace(/[^a-zA-Z0-9 ]/g, ' ').trim();
   const capWords = clean.match(/\b[A-Z][a-zA-Z0-9]{2,}\b/g);
-  if (capWords && capWords.length > 0) return capWords.slice(0, 2).join(' ');
+  if (capWords && capWords.length > 0) {
+    const name = capWords.slice(0, 2).join(' ');
+    return resolveVendorName(name) || name;
+  }
 
   return null;
 }
@@ -638,9 +723,21 @@ function guessCategory(name, contextText) {
 function scanText(text) {
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
 
-  // Map: vendorKey → { name, cost, isTotal, confidence, evidence }
+  // Map: canonicalName.toLowerCase() → { name, cost, isTotal, confidence, evidence }
   const vendorMap = new Map();
   const noVendorAmounts = [];
+
+  // First pass: scan for the document-level sender/vendor from email headers or title
+  const docVendor = (() => {
+    const emailMatch = text.match(/From:[^\n]*?[\w.+\-]+@([\w\-]{2,30})\.(com|io|ai|co|app|dev|net|org)/i);
+    if (emailMatch) {
+      const domain = emailMatch[1];
+      return resolveVendorName(domain) || (domain.charAt(0).toUpperCase() + domain.slice(1));
+    }
+    const receiptTitle = text.match(/(?:receipt|invoice|payment confirmation)\s+(?:from|for)\s+([A-Za-z][A-Za-z0-9 .&'\-]{1,40})/i);
+    if (receiptTitle) return resolveVendorName(receiptTitle[1]) || receiptTitle[1].trim();
+    return null;
+  })();
 
   for (const line of lines) {
     const lower = line.toLowerCase();
@@ -648,54 +745,46 @@ function scanText(text) {
     // Skip noise lines
     if (NOISE_WORDS.some(w => lower.includes(w))) continue;
 
-    // Find dollar amount in line
-    AMOUNT_RE.lastIndex = 0;
-    const amtMatch = AMOUNT_RE.exec(line);
-    const cost = amtMatch ? normalizeCost(amtMatch[1]) : null;
-
-    // Find known vendor
-    const vendor = ALL_VENDORS.find(v => lower.includes(v));
+    const cost = matchAmount(line);
     const isTotal = TOTAL_WORDS.some(w => lower.includes(w));
 
-    if (vendor) {
-      const key = vendor.toLowerCase();
-      const displayName = vendor.split(' ').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
+    // 1. Try known vendor/billing-name map first
+    const knownName = resolveVendorName(lower);
+
+    // 2. For lines with a dollar amount, also try structured extraction
+    //    but ONLY if the line contains subscription-like keywords or is a total line
+    const isSubLine = isTotal ||
+      /subscri|plan|member|billed|renewal|monthly|annually|yearly|invoic/i.test(line);
+
+    const extractedName = !knownName && cost !== null && isSubLine
+      ? extractNameFromContext(line, text)
+      : null;
+
+    const resolvedName = knownName || extractedName
+      // Last resort: use document-level vendor only on total/amount-due lines
+      || (docVendor && isTotal && cost !== null ? docVendor : null);
+
+    if (resolvedName) {
+      const key = resolvedName.toLowerCase();
       const existing = vendorMap.get(key);
+      const isKnown = !!knownName;
       const shouldReplace = !existing ||
         (isTotal && !existing.isTotal) ||
         (isTotal === existing.isTotal && cost !== null && cost > (existing.cost || 0));
       if (shouldReplace) {
         vendorMap.set(key, {
-          name: displayName,
+          name: resolvedName,
           cost: cost != null ? cost : (existing?.cost || 0),
           isTotal,
-          confidence: cost !== null ? VENDOR_CONFIDENCE.exact : VENDOR_CONFIDENCE.partial,
+          confidence: cost !== null
+            ? (isKnown ? VENDOR_CONFIDENCE.exact : VENDOR_CONFIDENCE.extracted)
+            : VENDOR_CONFIDENCE.partial,
           evidence: line.slice(0, 120),
-          knownVendor: true,
+          knownVendor: isKnown,
         });
       }
-    } else if (cost !== null && cost > 0) {
-      // Unknown vendor — try to extract name from this line + full doc
-      const extractedName = extractNameFromContext(line, text);
-      if (extractedName) {
-        const key = extractedName.toLowerCase();
-        const existing = vendorMap.get(key);
-        const shouldReplace = !existing ||
-          (isTotal && !existing.isTotal) ||
-          (isTotal === existing.isTotal && cost > (existing.cost || 0));
-        if (shouldReplace) {
-          vendorMap.set(key, {
-            name: extractedName,
-            cost,
-            isTotal,
-            confidence: VENDOR_CONFIDENCE.extracted,
-            evidence: line.slice(0, 120),
-            knownVendor: false,
-          });
-        }
-      } else if (isTotal || cost >= 5) {
-        noVendorAmounts.push({ line, cost, isTotal });
-      }
+    } else if (cost !== null && cost > 0 && (isTotal || cost >= 5)) {
+      noVendorAmounts.push({ line, cost, isTotal });
     }
   }
 
@@ -703,7 +792,6 @@ function scanText(text) {
 
   for (const [, entry] of vendorMap) {
     const { name, cost, confidence, evidence, knownVendor } = entry;
-    // Use guessCategory for unknown vendors to improve category detection
     const category = detectCategory(name) || (knownVendor ? 'other' : guessCategory(name, text));
     const { planName, usageHint } = detectPlan(name, cost);
     candidates.push({
@@ -715,7 +803,7 @@ function scanText(text) {
   // Last resort: vendor-less amounts only if nothing else was found
   if (candidates.length === 0) {
     for (const { line, cost } of noVendorAmounts.slice(0, 5)) {
-      const name = line.replace(AMOUNT_RE, '').replace(/[^a-zA-Z0-9 ]/g, ' ').trim().slice(0, 40) || 'Unknown Service';
+      const name = line.replace(/\$[\d,.]+/g, '').replace(/[^a-zA-Z0-9 ]/g, ' ').trim().slice(0, 40) || 'Unknown Service';
       const category = guessCategory(name, text);
       const { planName, usageHint } = detectPlan(name, cost);
       candidates.push({
